@@ -1,5 +1,9 @@
-"""Deterministic Korean morphology, pragmatics, and semantics toolkit for LLM agents."""
+"""Deterministic Korean morphology, pragmatics, semantics, and online adaptation toolkit."""
 
+from llm_linguistics.learner import (
+    OnlineLinguisticLearner,
+    get_learner,
+)
 from llm_linguistics.morph import (
     MorphConstraintSpec,
     attach_josa,
@@ -17,17 +21,19 @@ from llm_linguistics.semantics import (
     verify_rule_consistency,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "DialogueTurnInput",
     "MorphConstraintSpec",
     "NumericBound",
+    "OnlineLinguisticLearner",
     "PolicyRule",
     "__version__",
     "analyze_discourse",
     "attach_josa",
     "extract_logical_markers",
+    "get_learner",
     "normalize_for_rag",
     "verify_constraints",
     "verify_rule_consistency",
