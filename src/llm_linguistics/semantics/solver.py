@@ -10,6 +10,7 @@ from z3 import And, Bool, BoolRef, Not, RatNumRef, Real, Solver, is_true, sat
 from llm_linguistics.engine import get_kiwi, normalize_kiwi_jamo
 from llm_linguistics.learner import get_learner
 from llm_linguistics.semantics.schemas import (
+    AutoVerificationReport,
     ConsistencyReport,
     DeonticModality,
     ExtractedNumericPhrase,
@@ -348,3 +349,109 @@ def verify_rule_consistency(rules: list[PolicyRule]) -> ConsistencyReport:
         conflicts=conflicts,
         summary=summary,
     )
+
+
+MODAL_NOUN_TRIGGERS: frozenset[str] = frozenset({
+    "불가", "금지", "불허", "가능", "허용", "필수", "의무",
+})
+
+GENERIC_STRUCTURAL_NOUNS: frozenset[str] = frozenset({
+    "결제", "가입", "주문", "회원", "사용자", "경우", "후", "전",
+    "이내", "이상", "이하", "미만", "초과", "일", "월", "년", "원", "시", "때",
+})
+
+
+def _extract_action_from_tokens(norm_tokens: list[tuple[str, str]]) -> str:
+    # 1. Look from right to left for NNG/NNP followed by JKS/JX/JKO right before a modal noun
+    for i in range(len(norm_tokens) - 2, 0, -1):
+        f_curr, t_curr = norm_tokens[i]
+        if f_curr in MODAL_NOUN_TRIGGERS:
+            for k in range(i - 1, -1, -1):
+                fk, tk = norm_tokens[k]
+                if tk in ("NNG", "NNP") and fk not in MODAL_NOUN_TRIGGERS:
+                    return fk
+
+    # 2. Look from right to left for NNG/NNP immediately before XSV('하')
+    for i in range(len(norm_tokens) - 1, 0, -1):
+        f_curr, t_curr = norm_tokens[i]
+        f_prev, t_prev = norm_tokens[i - 1]
+        if t_curr == "XSV" and t_prev in ("NNG", "NNP") and f_prev not in MODAL_NOUN_TRIGGERS:
+            return f_prev
+
+    # 3. Look from right to left for a content verb VV
+    for f_curr, t_curr in reversed(norm_tokens):
+        if t_curr.startswith("VV"):
+            return f"{f_curr}다"
+
+    return "general_action"
+
+
+def _extract_subject_qualifier(
+    norm_tokens: list[tuple[str, str]],
+    has_universal_quantifier: bool,
+) -> dict[str, bool]:
+    if has_universal_quantifier:
+        return {}
+
+    # Collect initial topic or conditional noun chain before the first JX('은/는') or '경우'
+    cutoff = len(norm_tokens)
+    for idx, (form, tag) in enumerate(norm_tokens):
+        if (tag == "JX" and form in ("은", "는")) or (tag == "NNG" and form == "경우"):
+            cutoff = idx
+            break
+
+    qualifiers = [
+        form
+        for form, tag in norm_tokens[:cutoff]
+        if tag in ("NNG", "NNP") and form not in GENERIC_STRUCTURAL_NOUNS
+    ]
+    if not qualifiers:
+        return {}
+    return {f"cond_{'_'.join(qualifiers[:2])}": True}
+
+
+def auto_verify_korean_sentences(sentences: list[str]) -> AutoVerificationReport:
+    """Auto-formalize Korean policy sentences into PolicyRules and verify consistency via Z3."""
+    markers_res = extract_logical_markers(sentences)
+    kiwi = get_kiwi()
+    extracted_rules: list[PolicyRule] = []
+
+    for idx, s_item in enumerate(markers_res.sentences):
+        if s_item.deontic_modality == "NONE":
+            continue
+        norm_tokens = [
+            (normalize_kiwi_jamo(t.form), t.tag) for t in kiwi.tokenize(s_item.sentence)
+        ]
+        action = _extract_action_from_tokens(norm_tokens)
+        bool_conds = _extract_subject_qualifier(
+            norm_tokens,
+            has_universal_quantifier=len(s_item.universal_quantifiers) > 0,
+        )
+        num_conds = [
+            NumericBound(
+                variable=f"num_{np.unit or 'val'}",
+                operator=np.operator,
+                value=np.value,
+            )
+            for np in s_item.numeric_phrases
+        ]
+        extracted_rules.append(
+            PolicyRule(
+                rule_id=f"AUTO_R{idx + 1}",
+                source_sentence=s_item.sentence,
+                action=action,
+                modality=s_item.deontic_modality,
+                boolean_conditions=bool_conds,
+                numeric_conditions=num_conds,
+            )
+        )
+
+    if not extracted_rules:
+        raise ValueError("No deontic policy sentences (MUST/MAY/MUST_NOT) found in input.")
+
+    report = verify_rule_consistency(extracted_rules)
+    return AutoVerificationReport(
+        extracted_rules=extracted_rules,
+        consistency_report=report,
+    )
+

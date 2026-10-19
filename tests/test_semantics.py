@@ -131,3 +131,22 @@ def test_semantics_empty_inputs_raise() -> None:
 
     with pytest.raises(ValueError, match="must not be empty"):
         verify_rule_consistency([])
+
+
+def test_auto_verify_korean_sentences_from_raw_text() -> None:
+    from llm_linguistics.semantics import auto_verify_korean_sentences
+
+    raw_clauses = [
+        "결제 후 7일 이내인 모든 주문은 반드시 환불해야 한다.",
+        "디지털 콘텐츠는 결제 후 30일 이내라도 환불이 불가하다.",
+    ]
+    auto_rep = auto_verify_korean_sentences(raw_clauses)
+    assert len(auto_rep.extracted_rules) == 2
+    assert auto_rep.extracted_rules[0].action == "환불"
+    assert auto_rep.extracted_rules[1].action == "환불"
+    assert auto_rep.consistency_report.is_consistent is False
+    assert len(auto_rep.consistency_report.conflicts) == 1
+    witness = auto_rep.consistency_report.conflicts[0].witness_assignment
+    assert witness["cond_디지털_콘텐츠"] is True
+    assert float(witness["num_일"]) <= 7.0
+
