@@ -87,3 +87,11 @@ class ConsistencyReport(BaseModel):
     )
     conflicts: list[RuleConflictDetail]
     summary: str
+
+
+class AutoVerificationReport(BaseModel):
+    """End-to-end result of auto-formalizing Korean policy sentences and checking Z3 consistency."""
+
+    extracted_rules: list[PolicyRule]
+    consistency_report: ConsistencyReport
+

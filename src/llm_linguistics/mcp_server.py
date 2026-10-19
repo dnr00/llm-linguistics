@@ -11,8 +11,10 @@ from llm_linguistics.learner import (
     LearnedPragmaticCue,
     LearnedSemanticPattern,
     LearnedWordEntry,
+    OnlineUrlIngestionResult,
     PragmaticCategory,
     get_learner,
+    ingest_online_url,
 )
 from llm_linguistics.learner.schemas import UserWordTag
 from llm_linguistics.morph import (
@@ -32,9 +34,11 @@ from llm_linguistics.pragmatics import (
     analyze_discourse,
 )
 from llm_linguistics.semantics import (
+    AutoVerificationReport,
     ConsistencyReport,
     LogicalMarkerExtractionResult,
     PolicyRule,
+    auto_verify_korean_sentences,
     extract_logical_markers,
     verify_rule_consistency,
 )
@@ -47,10 +51,10 @@ mcp = FastMCP(
         "allomorphic Josa attachment, and irregular predicate/compound normalization for RAG; "
         "(2) pragmatics_analyze_discourse for 6-tier Korean speech-level tracking, "
         "honorific shifts, and Bayesian indirect speech-act detection; "
-        "(3) semantics_* tools for scope/quantifier/negation extraction and Z3 theorem prover "
-        "verification of policy/contract rule consistency; "
-        "(4) learn_* tools for online OOV word mining from corpus streams, Bayesian pragmatic "
-        "cue feedback updates, and semantic modality pattern registration."
+        "(3) semantics_* tools for scope/quantifier/negation extraction, auto-formalization, "
+        "and Z3 theorem prover verification of policy/contract rule consistency; "
+        "(4) learn_* tools for online URL/RSS corpus ingestion, OOV word mining, Bayesian "
+        "pragmatic cue feedback updates, and semantic modality pattern registration."
     ),
 )
 
@@ -118,6 +122,14 @@ def semantics_verify_rule_consistency(
 
 
 @mcp.tool()
+def semantics_auto_verify_sentences(
+    sentences: list[str],
+) -> AutoVerificationReport:
+    """Auto-formalize raw Korean policy sentences into PolicyRules and verify consistency via Z3."""
+    return auto_verify_korean_sentences(sentences=sentences)
+
+
+@mcp.tool()
 def learn_domain_corpus(
     texts: list[str],
     min_cnt: int = 2,
@@ -128,6 +140,22 @@ def learn_domain_corpus(
         texts=texts,
         min_cnt=min_cnt,
         min_pos_score=min_pos_score,
+    )
+
+
+@mcp.tool()
+def learn_from_online_url(
+    url: str,
+    min_cnt: int = 2,
+    min_pos_score: float = 0.2,
+    timeout_sec: float = 10.0,
+) -> OnlineUrlIngestionResult:
+    """Fetch a public HTTP/HTTPS page or RSS feed, extract Korean sentences, and mine OOV words."""
+    return ingest_online_url(
+        url=url,
+        min_cnt=min_cnt,
+        min_pos_score=min_pos_score,
+        timeout_sec=timeout_sec,
     )
 
 

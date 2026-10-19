@@ -98,3 +98,28 @@ def test_learner_invalid_inputs_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="non-NONE modality or is_exclusive"):
         learner.register_semantic_pattern("아무패턴", modality="NONE", is_exclusive=False)
+
+
+def test_html_or_xml_sentence_extraction_and_ssrf_guard() -> None:
+    from llm_linguistics.learner import html_or_xml_to_sentences, ingest_online_url
+
+    rss_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel>
+      <item>
+        <title>차세대 언어학 미들웨어 공개</title>
+        <description><![CDATA[
+          <p>우리는 제로슬립모드를 도입하여 응답 속도를 개선했습니다.</p>
+        ]]></description>
+      </item>
+    </channel></rss>
+    """
+    sents = html_or_xml_to_sentences(rss_xml)
+    assert len(sents) >= 2
+    assert any("제로슬립모드" in s for s in sents)
+
+    with pytest.raises(ValueError, match="Blocked or invalid hostname"):
+        ingest_online_url("http://localhost:8080/feed.xml")
+
+    with pytest.raises(ValueError, match="Private or reserved IP"):
+        ingest_online_url("http://192.168.1.1/internal")
+

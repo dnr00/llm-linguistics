@@ -76,3 +76,13 @@ class CorpusMiningResult(BaseModel):
     newly_registered_words: list[LearnedWordEntry]
     skipped_known_or_low_score: int
     total_learned_words: int
+
+
+class OnlineUrlIngestionResult(BaseModel):
+    """Result of fetching an online URL/RSS feed and mining Korean linguistic patterns."""
+
+    url: str
+    extracted_sentence_count: int
+    sample_sentences: list[str]
+    mining_result: CorpusMiningResult
+
