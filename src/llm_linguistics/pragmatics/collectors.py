@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from llm_linguistics.engine import is_hangul_syllable
 from llm_linguistics.learner.online_fetcher import (
+    DEFAULT_WEB_HEADERS,
     _validate_public_http_url,
     html_or_xml_to_blocks,
     html_or_xml_to_sentences,
@@ -486,16 +487,14 @@ def collect_web_dialogues(
 ) -> ChannelCollectionResult:
     """Fetch public web/RSS content, extract Korean dialogue turns, and train pragmatics + OOV."""
     _validate_url_and_resolved_ips(url)
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "llm-linguistics-mcp/0.4 (+https://github.com/dnr00/llm-linguistics)"
-        },
-    )
+    req = urllib.request.Request(url, headers=DEFAULT_WEB_HEADERS)
     with _safe_http_urlopen(req, timeout_sec=timeout_sec) as resp:
         raw_bytes = resp.read(2_000_000)
         charset = resp.headers.get_content_charset() or "utf-8"
-        raw_text = raw_bytes.decode(charset, errors="replace")
+        try:
+            raw_text = raw_bytes.decode(charset)
+        except (LookupError, UnicodeDecodeError):
+            raw_text = raw_bytes.decode("cp949", errors="replace")
 
     content_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()[:24]
     cp_store = get_checkpoint_store()

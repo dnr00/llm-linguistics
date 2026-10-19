@@ -1,7 +1,14 @@
 {
   "web_urls": [
+    "https://www.fmkorea.com/best",
+    "https://arca.live/b/live",
+    "https://gall.dcinside.com/board/lists?id=dcbest",
+    "https://www.clien.net/service/board/park",
+    "https://bbs.ruliweb.com/best/humor",
+    "https://www.dogdrip.net/dogdrip",
+    "https://pann.nate.com/talk/c20038",
+    "https://okky.kr/community/life",
     "https://news.hada.io/rss/news",
-    "https://tech.kakao.com/feed/",
     "https://toss.tech/rss.xml"
   ],
   "slack_channels": [],

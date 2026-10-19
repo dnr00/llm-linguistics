@@ -23,7 +23,12 @@ from llm_linguistics.cli_collect import (
     DEFAULT_SOURCES_CONFIG_PATH,
     CollectSourcesConfig,
 )
-from llm_linguistics.learner.online_fetcher import html_or_xml_to_blocks, html_or_xml_to_sentences
+from llm_linguistics.learner.online_fetcher import (
+    DEFAULT_WEB_HEADERS,
+    extract_community_post_url,
+    html_or_xml_to_blocks,
+    html_or_xml_to_sentences,
+)
 from llm_linguistics.learner.schemas import PragmaticCategory
 from llm_linguistics.learner.store import get_learner
 from llm_linguistics.pragmatics.analyzer import analyze_discourse
@@ -478,7 +483,9 @@ def run_autopilot_cycle(
     learner = get_learner()
 
     effective_limit = max(1, min(max_utterances, MAX_UTTERANCES_PER_LLM_CALL))
+    per_url_cap = max(1, effective_limit // max(1, len(config.web_urls)))
     candidate_utterances: list[tuple[str, PrivacyMode]] = []
+    overflow_candidates: list[tuple[str, PrivacyMode]] = []
     pending_web_hashes: dict[str, str] = {}
     oov_added_count = 0
 
@@ -490,16 +497,42 @@ def run_autopilot_cycle(
             _validate_url_and_resolved_ips(url)
             req = __import__("urllib.request").request.Request(
                 url,
-                headers={"User-Agent": "llm-linguistics-autopilot/0.4"},
+                headers=DEFAULT_WEB_HEADERS,
             )
             with _safe_http_urlopen(req, timeout_sec=http_timeout_sec) as resp:
                 raw_bytes = resp.read(2_000_000)
                 charset = resp.headers.get_content_charset() or "utf-8"
-                raw_text = raw_bytes.decode(charset, errors="replace")
+                try:
+                    raw_text = raw_bytes.decode(charset)
+                except (LookupError, UnicodeDecodeError):
+                    raw_text = raw_bytes.decode("cp949", errors="replace")
 
             content_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()[:24]
             if cp_store.state.web_content_hashes.get(url) == content_hash:
                 continue
+
+            post_url = extract_community_post_url(url, raw_text)
+            if post_url:
+                try:
+                    _validate_url_and_resolved_ips(post_url)
+                    post_req = __import__("urllib.request").request.Request(
+                        post_url,
+                        headers=DEFAULT_WEB_HEADERS,
+                    )
+                    with _safe_http_urlopen(post_req, timeout_sec=http_timeout_sec) as p_resp:
+                        p_bytes = p_resp.read(2_000_000)
+                        p_charset = p_resp.headers.get_content_charset() or "utf-8"
+                        try:
+                            p_text = p_bytes.decode(p_charset)
+                        except (LookupError, UnicodeDecodeError):
+                            p_text = p_bytes.decode("cp949", errors="replace")
+                        raw_text = p_text + "\n" + raw_text
+                except Exception as post_exc:
+                    logger.debug(
+                        "Optional community post fetch skipped url=%s: %s",
+                        post_url,
+                        post_exc,
+                    )
 
             blocks = html_or_xml_to_blocks(raw_text, min_hangul_syllables=8)
             sentences = html_or_xml_to_sentences(raw_text, min_hangul_syllables=6)
@@ -511,9 +544,16 @@ def run_autopilot_cycle(
 
             started_with_prior = len(candidate_utterances) > 0
             truncated_mid_url = False
+            added_from_this_url = 0
             for s_text in (sentences or blocks):
                 scrubbed = scrub_pii(s_text)
-                if len(scrubbed) < 8 or len(scrubbed) > 160:
+                if len(scrubbed) < 10 or len(scrubbed) > 160:
+                    continue
+                low_s = scrubbed.lower()
+                if any(
+                    tok in low_s
+                    for tok in (".jpg", ".gif", ".png", ".mp4", "[공지]", "[안내]", "[베타]")
+                ):
                     continue
                 # Check if already classified by deterministic analyzer
                 det = analyze_discourse(
@@ -524,7 +564,11 @@ def run_autopilot_cycle(
                     if len(candidate_utterances) >= effective_limit:
                         truncated_mid_url = True
                         break
-                    candidate_utterances.append((scrubbed, config.web_privacy_mode))
+                    if added_from_this_url < per_url_cap:
+                        candidate_utterances.append((scrubbed, config.web_privacy_mode))
+                        added_from_this_url += 1
+                    elif len(overflow_candidates) < effective_limit:
+                        overflow_candidates.append((scrubbed, config.web_privacy_mode))
 
             # If a secondary URL was truncated only because an earlier URL took part of the batch,
             # leave its hash un-checkpointed so the next cycle gives it a full batch.
@@ -532,6 +576,10 @@ def run_autopilot_cycle(
                 pending_web_hashes[url] = content_hash
         except Exception as exc:
             logger.warning("Autopilot web source skipped url=%s: %s", url, exc)
+
+    if len(candidate_utterances) < effective_limit and overflow_candidates:
+        needed = effective_limit - len(candidate_utterances)
+        candidate_utterances.extend(overflow_candidates[:needed])
 
     # 2. Optional Slack / Telegram / Export incremental collection
     for ch_id in config.slack_channels:

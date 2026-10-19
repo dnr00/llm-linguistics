@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -22,8 +23,82 @@ BLOCKED_HOSTS: frozenset[str] = frozenset({
 })
 
 
+IGNORED_HTML_TAGS: frozenset[str] = frozenset({
+    "script",
+    "style",
+    "noscript",
+    "head",
+    "nav",
+    "header",
+    "footer",
+    "aside",
+    "form",
+    "button",
+    "select",
+    "option",
+    "svg",
+})
+
+UI_BOILERPLATE_SUBSTRINGS: tuple[str, ...] = (
+    "바로가기",
+    "로그인이 유지",
+    "검색어 저장 기능이",
+    "구독중인 채널이 없습니다",
+    "야간 모드를 이용해",
+    "불법촬영물",
+    "개인정보처리방침",
+    "새창으로 이동",
+    "새로운 댓글이",
+    "업로드 가능 확장자",
+    "회원이 아니신가요",
+    "불러오는 중입니다",
+    "즐겨찾는 갤러리",
+    "갤러리명 클릭 시",
+    "모바일 앱 이용 안내",
+    "추천을 많이 받은 게시물",
+    "클릭하시면 해당 채널",
+    "카테고리 별 최신글",
+    "예고없이 삭제 또는 제한",
+    "권한을 제한할 수 있습니다",
+    "해당 IP나 ID를 제재",
+    "이용에 주의를 부탁",
+)
+
+COMMUNITY_POST_LINK_PATTERNS: tuple[str, ...] = (
+    r'href=["\'](/b/[a-z0-9_]+/[0-9]{8,12})(?:\?[^"\']*)?["\']',
+    r'href=["\'](/service/board/park/[0-9]{7,10})(?:\?[^"\']*)?["\']',
+    r'href=["\'](https://bbs\.ruliweb\.com/best/board/[0-9]+/read/[0-9]+)["\']',
+    r'href=["\'](/talk/[0-9]{8,12})["\']',
+    r'href=["\'](/dogdrip/[0-9]{8,12})(?:\?[^"\']*)?["\']',
+)
+
+DEFAULT_WEB_HEADERS: dict[str, str] = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8",
+}
+
+
+def extract_community_post_url(base_url: str, raw_html: str) -> str | None:
+    """Extract a non-notice post URL from a Korean community board page for comment harvesting."""
+    base_host = (urllib.parse.urlparse(base_url).hostname or "").lower()
+    for pat in COMMUNITY_POST_LINK_PATTERNS:
+        matches = list(dict.fromkeys(re.findall(pat, raw_html)))
+        if not matches:
+            continue
+        chosen = matches[2] if len(matches) >= 3 else matches[-1]
+        candidate = urllib.parse.urljoin(base_url, chosen)
+        cand_host = (urllib.parse.urlparse(candidate).hostname or "").lower()
+        if cand_host == base_host:
+            return candidate
+    return None
+
+
 class _VisibleTextExtractor(HTMLParser):
-    """Extract visible text from HTML while ignoring script/style blocks."""
+    """Extract visible text from HTML while ignoring script/style/nav/chrome blocks."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -31,16 +106,16 @@ class _VisibleTextExtractor(HTMLParser):
         self.chunks: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() in ("script", "style", "noscript", "head"):
+        if tag.lower() in IGNORED_HTML_TAGS:
             self._ignored_depth += 1
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() in ("script", "style", "noscript", "head") and self._ignored_depth > 0:
+        if tag.lower() in IGNORED_HTML_TAGS and self._ignored_depth > 0:
             self._ignored_depth -= 1
 
     def handle_data(self, data: str) -> None:
         if self._ignored_depth == 0:
-            stripped = data.strip()
+            stripped = " ".join(data.split())
             if stripped:
                 self.chunks.append(stripped)
 
@@ -89,6 +164,8 @@ def html_or_xml_to_blocks(raw_content: str, min_hangul_syllables: int = 5) -> li
     filtered_blocks: list[str] = []
     for block in text_blocks:
         b_text = block.strip()
+        if any(bad in b_text for bad in UI_BOILERPLATE_SUBSTRINGS):
+            continue
         hangul_cnt = sum(1 for ch in b_text if is_hangul_syllable(ch))
         if hangul_cnt >= min_hangul_syllables:
             filtered_blocks.append(b_text)
