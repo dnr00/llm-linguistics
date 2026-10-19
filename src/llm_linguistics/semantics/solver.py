@@ -51,10 +51,39 @@ NUMERIC_BOUND_RE = re.compile(
 )
 
 
-def _detect_deontic_modality(sentence: str) -> DeonticModality:
+def _detect_deontic_modality(sentence: str, norm_tokens: list[tuple[str, str]]) -> DeonticModality:
+    # Check for double-negation obligation: '-지 않을 수 없다' / '-지 아니할 수 없다' -> MUST
+    for i in range(len(norm_tokens) - 3):
+        f0, t0 = norm_tokens[i]
+        f1, t1 = norm_tokens[i + 1]
+        f2, t2 = norm_tokens[i + 2]
+        f3, t3 = norm_tokens[i + 3]
+        if (
+            t0 == "VX"
+            and f0 in ("않", "아니하")
+            and t1 == "ETM"
+            and f1 in ("을", "ㄹ")
+            and t2 == "NNB"
+            and f2 == "수"
+            and t3 == "VA"
+            and f3 == "없"
+        ):
+            return "MUST"
+
+    # Check general ETM('을'/'ㄹ') + NNB('수') + VA('없'/'있') across any verb stem
+    for i in range(len(norm_tokens) - 2):
+        f0, t0 = norm_tokens[i]
+        f1, t1 = norm_tokens[i + 1]
+        f2, t2 = norm_tokens[i + 2]
+        if t0 == "ETM" and f0 in ("을", "ㄹ") and t1 == "NNB" and f1 == "수" and t2 == "VA":
+            if f2 == "없":
+                return "MUST_NOT"
+            if f2 == "있":
+                return "MAY"
+
     if any(
         pat in sentence
-        for pat in ("해서는 안", "할 수 없", "불가", "금지", "불허", "아니 된다", "안 된다")
+        for pat in ("해서는 안", "불가", "금지", "불허", "아니 된다", "안 된다")
     ):
         return "MUST_NOT"
     if any(
@@ -62,7 +91,7 @@ def _detect_deontic_modality(sentence: str) -> DeonticModality:
         for pat in ("해야", "하여야", "의무", "필수", "반드시", "요한다")
     ):
         return "MUST"
-    if any(pat in sentence for pat in ("할 수 있", "가능하", "가능함", "허용")):
+    if any(pat in sentence for pat in ("가능하", "가능함", "허용")):
         return "MAY"
     return "NONE"
 
@@ -95,6 +124,7 @@ def extract_logical_markers(sentences: list[str]) -> LogicalMarkerExtractionResu
 
     for idx, sent in enumerate(sentences):
         tokens = kiwi.tokenize(sent)
+        norm_tokens: list[tuple[str, str]] = []
         universals: list[str] = []
         existentials: list[str] = []
         exclusives: list[str] = []
@@ -103,6 +133,7 @@ def extract_logical_markers(sentences: list[str]) -> LogicalMarkerExtractionResu
 
         for tok in tokens:
             norm_form = normalize_kiwi_jamo(tok.form)
+            norm_tokens.append((norm_form, tok.tag))
             if norm_form in UNIVERSAL_QUANTIFIERS and tok.tag in ("MM", "NNG", "MAG"):
                 universals.append(norm_form)
             if norm_form in EXISTENTIAL_QUANTIFIERS and tok.tag in ("MM", "NNG"):
@@ -143,7 +174,7 @@ def extract_logical_markers(sentences: list[str]) -> LogicalMarkerExtractionResu
                 exclusive_markers=exclusives,
                 negations=negations,
                 is_double_negation=is_double_neg,
-                deontic_modality=_detect_deontic_modality(sent),
+                deontic_modality=_detect_deontic_modality(sent, norm_tokens),
                 conditional_connectives=conditionals,
                 numeric_phrases=_extract_numeric_phrases(sent),
             )

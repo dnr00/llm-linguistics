@@ -17,10 +17,12 @@ def test_extract_logical_markers_quantifiers_negations_and_bounds() -> None:
         "모든 회원은 가입 후 7일 이내에만 환불을 요청할 수 있다.",
         "일부 특가 상품은 어떠한 경우에도 환불이 불가하다.",
         "본 규정이 적용되지 않는 것은 아니다.",
+        "확정된 계약 조건은 임의로 바꿀 수 없다.",
+        "법령에 따라 결과를 통보하지 않을 수 없다.",
     ]
     res = extract_logical_markers(sentences)
 
-    assert res.sentence_count == 3
+    assert res.sentence_count == 5
 
     s0 = res.sentences[0]
     assert "모든" in s0.universal_quantifiers
@@ -36,7 +38,15 @@ def test_extract_logical_markers_quantifiers_negations_and_bounds() -> None:
 
     s2 = res.sentences[2]
     assert s2.is_double_negation is True
-    assert res.double_negation_indices == [2]
+
+    s3 = res.sentences[3]
+    assert s3.deontic_modality == "MUST_NOT"
+
+    s4 = res.sentences[4]
+    assert s4.is_double_negation is True
+    assert s4.deontic_modality == "MUST"
+
+    assert res.double_negation_indices == [2, 4]
     assert res.exclusive_constraint_indices == [0]
 
 
