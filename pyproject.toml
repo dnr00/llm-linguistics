@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llm-linguistics"
+version = "0.1.0"
+description = "Deterministic Korean morphology, pragmatics, and formal semantics toolkit + MCP server for LLM agents"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=2.0.0",
+    "kiwipiepy>=0.18.0",
+    "pydantic>=2.7.0",
+    "z3-solver>=4.13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.6.0",
+]
+
+[project.scripts]
+llm-linguistics-mcp = "llm_linguistics.mcp_server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llm_linguistics"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:anchorpy"
