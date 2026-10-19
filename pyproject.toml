@@ -4,8 +4,9 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-linguistics"
-version = "0.1.0"
+version = "0.2.0"
 description = "Deterministic Korean morphology, pragmatics, and formal semantics toolkit + MCP server for LLM agents"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastmcp>=2.0.0",
