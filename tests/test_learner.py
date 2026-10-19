@@ -20,10 +20,17 @@ def test_online_corpus_oov_mining_hotloads_into_kiwi(tmp_path: Path) -> None:
         "우리는 제로슬립모드로 봇을 운영하고 제로슬립모드를 검증했다.",
         "이번 배포에서 제로슬립모드가 정상 작동하는지 확인했다.",
         "제로슬립모드로 전환한 뒤 지연 시간이 줄어들었다.",
+        "라즈베리파이와 오픈소스를 활용해 네이버페이 결제를 연동했다.",
+        "라즈베리파이에서 오픈소스 기반으로 네이버페이 모듈을 검증했다.",
+        "라즈베리파이 환경의 오픈소스는 네이버페이와 호환된다.",
     ]
     res = learner.mine_corpus_oov_words(corpus, min_cnt=2, min_pos_score=0.2)
     learned_words = [w.word for w in res.newly_registered_words]
     assert "제로슬립모드" in learned_words
+    assert "라즈베리파" not in learned_words
+    assert "오픈소" not in learned_words
+    assert "네이버페" not in learned_words
+    assert "검증했" not in learned_words
 
     rag_out = normalize_for_rag("제로슬립모드를 활성화했다.")
     assert "제로슬립모드" in rag_out.content_lemmas

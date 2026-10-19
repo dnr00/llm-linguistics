@@ -301,6 +301,39 @@ def _extract_json_object(raw_text: str) -> dict[str, Any]:
     raise ValueError("LLM response did not contain a valid JSON object.")
 
 
+PRAGMATIC_PRIORITY_MARKERS: tuple[str, ...] = (
+    "?",
+    "나요",
+    "까요",
+    "시죠",
+    "잖아",
+    "네요",
+    "할듯",
+    "건가요",
+    "라고",
+    "시길",
+    "합시다",
+    "바랍니다",
+    "부탁",
+    "어렵",
+    "보류",
+    "검토",
+    "힘들",
+    "곤란",
+    "글쎄",
+    "아닌가",
+    "해야",
+    "도대체",
+    "제발",
+    "자제",
+)
+
+
+def _pragmatic_candidate_priority(text: str) -> int:
+    """Score candidate sentences so conversational/pragmatic turns precede flat headlines."""
+    return sum(1 for marker in PRAGMATIC_PRIORITY_MARKERS if marker in text)
+
+
 def build_teacher_prompt(utterances: list[str]) -> str:
     """Construct single-turn distillation prompt for Korean pragmatics and semantics."""
     numbered = "\n".join(f"[{idx}] {text}" for idx, text in enumerate(utterances))
@@ -324,10 +357,14 @@ def build_teacher_prompt(utterances: list[str]) -> str:
         "  ]\n"
         "}\n\n"
         "Rules:\n"
-        "1. Only include `pragmatic_labels` for sentences that clearly exhibit one of the 4 "
-        "non-literal speech acts with confidence >= 0.75. Omit purely literal news/facts.\n"
-        "2. Only include generalizable multi-character Korean phrases in `pragmatic_cues` and "
-        "`semantic_patterns` (never proper nouns, names, or numbers).\n\n"
+        "1. Include `pragmatic_labels` (confidence >= 0.75) for workplace or community sentences "
+        "that express: polite refusal/deferral (`indirect_refusal_or_deferral`), urging/requesting "
+        "action or restraint (`indirect_request_or_urge`), skeptical dissent/reservation/pushback "
+        "(`hedged_dissent_or_reservation`), or rhetorical rebuke/blame/sarcasm/pressure "
+        "(`direct_pressure_or_blame`). Omit purely neutral news facts.\n"
+        "2. Extract reusable 2-6 syllable Korean pragmatic ending/marker phrases into "
+        "`pragmatic_cues` and deontic phrases into `semantic_patterns` (never proper nouns or "
+        "numbers).\n\n"
         f"Sentences:\n{numbered}\n"
     )
 
@@ -545,7 +582,12 @@ def run_autopilot_cycle(
             started_with_prior = len(candidate_utterances) > 0
             truncated_mid_url = False
             added_from_this_url = 0
-            for s_text in (sentences or blocks):
+            ranked_texts = sorted(
+                sentences or blocks,
+                key=_pragmatic_candidate_priority,
+                reverse=True,
+            )
+            for s_text in ranked_texts:
                 scrubbed = scrub_pii(s_text)
                 if len(scrubbed) < 10 or len(scrubbed) > 160:
                     continue

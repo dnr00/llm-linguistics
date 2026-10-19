@@ -104,8 +104,50 @@ class OnlineLinguisticLearner:
             lm_filter=False,
         )
 
+        sent_spans: list[tuple[str, set[int], set[int]]] = []
+        for s in texts:
+            toks = kiwi.tokenize(s)
+            starts = {t.start for t in toks}
+            ends = {
+                t.start + t.len
+                for t in toks
+                if t.tag.startswith(("NN", "XR", "XSN", "XPN", "NR")) or t.tag == "ETN"
+            }
+            sent_spans.append((s, starts, ends))
+
+        trailing_forbidden_tags = {
+            "EP",
+            "EF",
+            "EC",
+            "ETM",
+            "JKS",
+            "JKC",
+            "JKG",
+            "JKO",
+            "JKB",
+            "JC",
+            "VV",
+            "VA",
+            "VX",
+            "VCP",
+            "VCN",
+            "MM",
+            "Z_CODA",
+        }
+        internal_forbidden_tags = {
+            "EP",
+            "EF",
+            "ETM",
+            "VCP",
+            "VCN",
+            "Z_CODA",
+            "JKG",
+            "MM",
+        }
+
         newly_registered: list[LearnedWordEntry] = []
         skipped = 0
+        valid_candidates: list[tuple[str, int, float]] = []
 
         for cand in candidates:
             word_str = str(cand[0]).strip()
@@ -119,9 +161,40 @@ class OnlineLinguisticLearner:
                 skipped += 1
                 continue
 
-            # Only register if Kiwi currently fragments the candidate into >= 2 tokens
+            # Ensure candidate starts and ends on actual morpheme boundaries in the texts
+            aligned_cnt = 0
+            for s, starts, ends in sent_spans:
+                idx = s.find(word_str)
+                while idx != -1:
+                    if idx in starts and (idx + len(word_str)) in ends:
+                        aligned_cnt += 1
+                    idx = s.find(word_str, idx + 1)
+            if aligned_cnt < min_cnt:
+                skipped += 1
+                continue
+
             current_tokens = kiwi.tokenize(word_str)
             if len(current_tokens) < 2:
+                skipped += 1
+                continue
+            tags = [t.tag for t in current_tokens]
+            if (
+                tags[-1] in trailing_forbidden_tags
+                or any(t in internal_forbidden_tags for t in tags)
+                or word_str.endswith("으")
+            ):
+                skipped += 1
+                continue
+
+            valid_candidates.append((word_str, freq, p_score))
+
+        for word_str, freq, p_score in valid_candidates:
+            if any(
+                word_str != other_w
+                and word_str in other_w
+                and other_f >= freq * 0.7
+                for other_w, other_f, _ in valid_candidates
+            ):
                 skipped += 1
                 continue
 

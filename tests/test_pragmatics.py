@@ -394,8 +394,10 @@ def test_multi_channel_collectors_slack_telegram_web_and_security(
     )
     web_html = (
         "<html><body>"
-        "<p>이번 분기에는 양자내성암호화모듈 도입을 잠정 유예 상태로 두겠습니다.</p>"
-        "<p>네, 아쉽네요. 양자내성암호화모듈은 보류하시는 걸로 알겠습니다.</p>"
+        "<p>이번에는 초저지연모드로 운영하고 초저지연모드를 검증하는 일정은 "
+        "잠정 유예 상태로 두겠습니다.</p>"
+        "<p>네, 아쉽네요. 초저지연모드가 준비될 때까지 초저지연모드로 "
+        "전환하는 건 보류하시는 걸로 알겠습니다.</p>"
         "</body></html>"
     ).encode()
     monkeypatch.setattr(
