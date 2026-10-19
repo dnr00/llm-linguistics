@@ -188,6 +188,25 @@ def test_privacy_separation_features_only_and_pii_scrubbing(
     dup_res = engine.ingest_dialogue_turns(private_dialogue, privacy_mode="features_only")
     assert dup_res.appended_records == 0
 
+    # Same-speaker consecutive utterances must NOT bootstrap a reaction label
+    same_speaker_turns = [
+        DialogueTurnInput(speaker="U1", text="이 부분 수정 가능할까요?"),
+        DialogueTurnInput(speaker="U1", text="제가 바로 확인해서 곧 회신드리겠습니다."),
+    ]
+    same_res = engine.ingest_dialogue_turns(same_speaker_turns, privacy_mode="features_only")
+    assert same_res.bootstrapped_from_reactions == 0
+    assert same_res.appended_records == 0
+
+    # private_scrubbed with only proper nouns must be skipped and never leak /NNP to weights
+    nnp_only_turns = [
+        DialogueTurnInput(speaker="U1", text="김철수"),
+        DialogueTurnInput(speaker="U2", text="네, 아쉽네요."),
+    ]
+    nnp_res = engine.ingest_dialogue_turns(nnp_only_turns, privacy_mode="private_scrubbed")
+    assert nnp_res.appended_records == 0
+    weights_raw = weights_file.read_text(encoding="utf-8")
+    assert "김철수" not in weights_raw
+
     # N-gram inference works on the newly learned private features
     probe = [DialogueTurnInput(speaker="A", text="이 건은 영구 폐기 절차로 돌리겠습니다.")]
     analyzed = analyze_discourse(probe)
@@ -196,19 +215,23 @@ def test_privacy_separation_features_only_and_pii_scrubbing(
     reset_corpus_engine_for_testing()
 
 
-def test_multi_channel_collectors_slack_telegram_and_export(
+def test_multi_channel_collectors_slack_telegram_web_and_security(
     tmp_path: pytest.TempPathFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import json
     import shutil
+    import urllib.error
+    from email.message import Message
     from pathlib import Path
     from typing import Any
 
     import llm_linguistics.pragmatics.collectors as col_mod
+    from llm_linguistics.learner import reset_learner_for_testing
     from llm_linguistics.pragmatics import (
         collect_slack_channel,
         collect_telegram_updates,
+        collect_web_dialogues,
         ingest_telegram_export,
         reset_checkpoint_store_for_testing,
         reset_corpus_engine_for_testing,
@@ -220,6 +243,7 @@ def test_multi_channel_collectors_slack_telegram_and_export(
     priv_corpus = temp_dir / "priv.jsonl"
     weights_file = temp_dir / "weights.json"
     checkpoints_file = temp_dir / "checkpoints.json"
+    learner_file = temp_dir / "learned.json"
     shutil.copyfile(DEFAULT_CORPUS_PATH, pub_corpus)
 
     reset_corpus_engine_for_testing(
@@ -227,6 +251,7 @@ def test_multi_channel_collectors_slack_telegram_and_export(
         private_corpus_path=priv_corpus,
         weights_path=weights_file,
     )
+    reset_learner_for_testing(state_path=learner_file)
     cp_store = reset_checkpoint_store_for_testing(path=checkpoints_file)
 
     # 1. Missing token raises explicit RuntimeError
@@ -234,7 +259,7 @@ def test_multi_channel_collectors_slack_telegram_and_export(
     with pytest.raises(RuntimeError, match="Missing SLACK_BOT_TOKEN"):
         collect_slack_channel("C12345")
 
-    # 2. Mock Slack API history & thread replies
+    # 2. Mock Slack API history & thread replies (exact 1 reaction bootstrap)
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test-token")
 
     def fake_slack_get(
@@ -277,7 +302,8 @@ def test_multi_channel_collectors_slack_telegram_and_export(
     assert slack_res.checkpoint_cursor == "1700000010.000100"
     assert cp_store.state.slack_cursors["C12345"] == "1700000010.000100"
     assert slack_res.ingestion_result is not None
-    assert slack_res.ingestion_result.bootstrapped_from_reactions >= 1
+    assert slack_res.ingestion_result.bootstrapped_from_reactions == 1
+    assert slack_res.ingestion_result.appended_records == 1
 
     # 3. Telegram Desktop JSON export with reply_to_message_id linking
     tg_export = [
@@ -300,10 +326,15 @@ def test_multi_channel_collectors_slack_telegram_and_export(
     assert tg_res.ingestion_result.bootstrapped_from_reactions == 1
     assert tg_res.ingestion_result.appended_records == 1
 
-    # 4. Telegram Bot getUpdates with checkpoint advance
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:ABC-DEF")
+    # 4. Telegram Bot getUpdates with exact 1 bootstrap and no duplicate reply pairing
+    secret_tg_token = "999999:SUPER-SECRET-TG-TOKEN"
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", secret_tg_token)
 
     class _FakeResp:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+            self.headers = Message()
+
         def __enter__(self) -> _FakeResp:
             return self
 
@@ -311,32 +342,93 @@ def test_multi_channel_collectors_slack_telegram_and_export(
             pass
 
         def read(self, _n: int = -1) -> bytes:
-            return json.dumps({
-                "ok": True,
-                "result": [
-                    {
-                        "update_id": 500,
-                        "message": {
-                            "chat": {"id": 777},
-                            "from": {"id": 11},
-                            "text": "지금 바로 확인해서 오늘 중으로 바로 공유하겠습니다.",
-                            "reply_to_message": {
-                                "from": {"id": 22},
-                                "text": "로그 분석 자료 언제쯤 받아볼 수 있을까요?",
-                            },
-                        },
-                    }
-                ],
-            }).encode("utf-8")
+            return self._body
 
-    monkeypatch.setattr(col_mod.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
+    tg_payload = json.dumps({
+        "ok": True,
+        "result": [
+            {
+                "update_id": 500,
+                "message": {
+                    "chat": {"id": 777},
+                    "from": {"id": 11},
+                    "text": "지금 바로 확인해서 오늘 중으로 바로 공유하겠습니다.",
+                    "reply_to_message": {
+                        "from": {"id": 22},
+                        "text": "로그 분석 자료 언제쯤 받아볼 수 있을까요?",
+                    },
+                },
+            }
+        ],
+    }).encode("utf-8")
+
+    monkeypatch.setattr(
+        col_mod.urllib.request,
+        "urlopen",
+        lambda *a, **kw: _FakeResp(tg_payload),
+    )
     tg_upd_res = collect_telegram_updates(privacy_mode="features_only")
     assert tg_upd_res.checkpoint_cursor == "501"
     assert cp_store.state.telegram_offset == 501
     assert tg_upd_res.ingestion_result is not None
-    assert tg_upd_res.ingestion_result.bootstrapped_from_reactions >= 1
+    assert tg_upd_res.ingestion_result.bootstrapped_from_reactions == 1
+    assert tg_upd_res.ingestion_result.appended_records == 1
+
+    # 5. Telegram HTTP error must NOT leak TELEGRAM_BOT_TOKEN in message or __cause__
+    def _raise_http_err(req: Any, *a: object, **kw: object) -> Any:
+        raise urllib.error.HTTPError(
+            req.full_url, 401, "Unauthorized", Message(), None
+        )
+
+    monkeypatch.setattr(col_mod.urllib.request, "urlopen", _raise_http_err)
+    with pytest.raises(RuntimeError) as exc_info:
+        collect_telegram_updates()
+    assert secret_tg_token not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+
+    # 6. Web dialogue collector: initial fetch + OOV mining + hash skip + SSRF DNS block
+    monkeypatch.setattr(
+        col_mod.socket,
+        "getaddrinfo",
+        lambda host, port, *a, **kw: [(2, 1, 6, "", ("93.184.216.34", 0))],
+    )
+    web_html = (
+        "<html><body>"
+        "<p>이번 분기에는 양자내성암호화모듈 도입을 잠정 유예 상태로 두겠습니다.</p>"
+        "<p>네, 아쉽네요. 양자내성암호화모듈은 보류하시는 걸로 알겠습니다.</p>"
+        "</body></html>"
+    ).encode()
+    monkeypatch.setattr(
+        col_mod,
+        "_safe_http_urlopen",
+        lambda req, timeout_sec: _FakeResp(web_html),
+    )
+    web_res = collect_web_dialogues(
+        "https://example.com/dialogues",
+        privacy_mode="public_full",
+        also_mine_oov=True,
+    )
+    assert web_res.skipped_unchanged is False
+    assert web_res.ingestion_result is not None
+    assert web_res.ingestion_result.bootstrapped_from_reactions == 1
+    assert len(web_res.oov_words_added) >= 1
+
+    # Repeat fetch with identical payload is skipped via checkpoint hash
+    web_dup = collect_web_dialogues("https://example.com/dialogues")
+    assert web_dup.skipped_unchanged is True
+
+    # DNS resolving to private IP 10.0.0.1 is blocked
+    monkeypatch.setattr(
+        col_mod.socket,
+        "getaddrinfo",
+        lambda host, port, *a, **kw: [(2, 1, 6, "", ("10.0.0.1", 0))],
+    )
+    with pytest.raises(ValueError, match="non-public IP"):
+        collect_web_dialogues("https://rebind.example.com/dialogues")
 
     reset_corpus_engine_for_testing()
     reset_checkpoint_store_for_testing()
+    reset_learner_for_testing()
+
 
 

@@ -265,15 +265,17 @@ class PragmaticCorpusEngine:
 
     def retrain_from_corpus(self, min_feature_df: int = 1) -> PragmaticModelWeights:
         """Compute Dirichlet-smoothed log-odds weights for morphological N-grams across classes."""
-        records = self.load_records()
-        if not records:
+        pub_records = self.load_public_records()
+        priv_records = self.load_private_records()
+        total_n = len(pub_records) + len(priv_records)
+        if total_n == 0:
             return PragmaticModelWeights()
 
         class_counts: Counter[str] = Counter()
         feature_class_counts: dict[str, Counter[str]] = defaultdict(Counter)
         feature_total_counts: Counter[str] = Counter()
 
-        for rec in records:
+        for rec in pub_records:
             class_counts[rec.label] += 1
             feats = (
                 rec.morph_features
@@ -284,7 +286,18 @@ class PragmaticCorpusEngine:
                 feature_class_counts[rec.label][f] += 1
                 feature_total_counts[f] += 1
 
-        total_n = len(records)
+        for rec in priv_records:
+            class_counts[rec.label] += 1
+            raw_feats = (
+                rec.morph_features
+                if rec.morph_features
+                else extract_morph_features(rec.text, allow_proper_nouns=False)
+            )
+            feats = [f for f in raw_feats if "/NNP" not in f]
+            for f in feats:
+                feature_class_counts[rec.label][f] += 1
+                feature_total_counts[f] += 1
+
         alpha = 0.5
         learned_log_odds: dict[str, dict[str, float]] = {}
 
@@ -356,37 +369,28 @@ class PragmaticCorpusEngine:
             u_hash = rec.utterance_hash or compute_utterance_hash(rec.text)
             if u_hash in existing_fps or (rec.text and rec.text in existing_fps):
                 continue
-            existing_fps.add(u_hash)
 
-            if privacy_mode == "features_only":
-                feats = rec.morph_features or extract_morph_features(
+            if privacy_mode in ("features_only", "private_scrubbed"):
+                raw_feats = rec.morph_features or extract_morph_features(
                     rec.text, allow_proper_nouns=False
                 )
+                feats = [f for f in raw_feats if "/NNP" not in f]
                 if not feats:
                     continue
+                existing_fps.add(u_hash)
                 sanitized = PragmaticCorpusRecord(
                     speaker="anon",
-                    text="",
-                    next_reaction="",
-                    label=rec.label,
-                    source=rec.source,
-                    utterance_hash=u_hash,
-                    morph_features=feats,
-                )
-            elif privacy_mode == "private_scrubbed":
-                feats = rec.morph_features or extract_morph_features(
-                    rec.text, allow_proper_nouns=False
-                )
-                sanitized = PragmaticCorpusRecord(
-                    speaker="anon",
-                    text=scrub_pii(rec.text),
-                    next_reaction=scrub_pii(rec.next_reaction),
+                    text="" if privacy_mode == "features_only" else scrub_pii(rec.text),
+                    next_reaction=(
+                        "" if privacy_mode == "features_only" else scrub_pii(rec.next_reaction)
+                    ),
                     label=rec.label,
                     source=rec.source,
                     utterance_hash=u_hash,
                     morph_features=feats,
                 )
             else:
+                existing_fps.add(u_hash)
                 sanitized = PragmaticCorpusRecord(
                     speaker=rec.speaker,
                     text=scrub_pii(rec.text),
@@ -451,42 +455,49 @@ class PragmaticCorpusEngine:
         prob = round(1.0 / (1.0 + math.exp(-(best_score - threshold + 0.5))), 4)
         return best_cls, prob, best_matched
 
-    def ingest_dialogue_turns(
+    def ingest_dialogue_sessions(
         self,
-        turns: list[DialogueTurnInput],
-        explicit_labels: dict[int, IllocutionaryForce] | None = None,
+        sessions: list[list[DialogueTurnInput]],
+        explicit_labels: dict[tuple[int, int], IllocutionaryForce] | None = None,
         privacy_mode: PrivacyMode = "public_full",
         source_tag: str = "online",
     ) -> DialogueIngestionResult:
-        """Ingest a multi-turn dialogue, bootstrap labels from reactions, and retrain weights."""
-        if not turns:
-            raise ValueError("turns list must not be empty.")
+        """Ingest multiple independent dialogue sessions without cross-boundary pairing."""
+        if not sessions or all(not s for s in sessions):
+            raise ValueError("sessions list must not be empty.")
 
         explicit = explicit_labels or {}
         candidate_records: list[PragmaticCorpusRecord] = []
         bootstrapped_cnt = 0
 
-        for idx, turn in enumerate(turns):
-            next_text = turns[idx + 1].text if idx + 1 < len(turns) else ""
-            label = explicit.get(idx)
-            source = source_tag
-            if label is None:
-                weak = infer_weak_label_from_reaction(next_text)
-                if weak is not None:
-                    label = weak
-                    source = f"{source_tag}:reaction_bootstrap"
-                    bootstrapped_cnt += 1
-
-            if label is not None:
-                candidate_records.append(
-                    PragmaticCorpusRecord(
-                        speaker=turn.speaker,
-                        text=turn.text,
-                        next_reaction=next_text,
-                        label=label,
-                        source=source,
-                    )
+        for s_idx, turns in enumerate(sessions):
+            for idx, turn in enumerate(turns):
+                has_next = idx + 1 < len(turns)
+                next_turn = turns[idx + 1] if has_next else None
+                next_text = next_turn.text if next_turn is not None else ""
+                is_different_speaker = (
+                    next_turn is not None and next_turn.speaker != turn.speaker
                 )
+
+                label = explicit.get((s_idx, idx))
+                source = source_tag
+                if label is None and is_different_speaker:
+                    weak = infer_weak_label_from_reaction(next_text)
+                    if weak is not None:
+                        label = weak
+                        source = f"{source_tag}:reaction_bootstrap"
+                        bootstrapped_cnt += 1
+
+                if label is not None:
+                    candidate_records.append(
+                        PragmaticCorpusRecord(
+                            speaker=turn.speaker,
+                            text=turn.text,
+                            next_reaction=next_text if is_different_speaker else "",
+                            label=label,
+                            source=source,
+                        )
+                    )
 
         written_cnt = self.append_records(
             candidate_records,
@@ -506,6 +517,26 @@ class PragmaticCorpusEngine:
             target_store=target_store,
             total_corpus_records=stats.total_corpus_records,
             top_newly_weighted_features=stats.top_features_by_class,
+        )
+
+    def ingest_dialogue_turns(
+        self,
+        turns: list[DialogueTurnInput],
+        explicit_labels: dict[int, IllocutionaryForce] | None = None,
+        privacy_mode: PrivacyMode = "public_full",
+        source_tag: str = "online",
+    ) -> DialogueIngestionResult:
+        """Ingest a single multi-turn dialogue session and retrain weights."""
+        if not turns:
+            raise ValueError("turns list must not be empty.")
+        mapped_labels = (
+            {(0, k): v for k, v in explicit_labels.items()} if explicit_labels else None
+        )
+        return self.ingest_dialogue_sessions(
+            sessions=[turns],
+            explicit_labels=mapped_labels,
+            privacy_mode=privacy_mode,
+            source_tag=source_tag,
         )
 
     def get_stats(self, top_k: int = 8) -> PragmaticCorpusStats:

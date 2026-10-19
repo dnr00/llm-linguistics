@@ -11,13 +11,14 @@ import urllib.parse
 import urllib.request
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from pydantic import BaseModel, Field
 
 from llm_linguistics.engine import is_hangul_syllable
 from llm_linguistics.learner.online_fetcher import (
     _validate_public_http_url,
+    html_or_xml_to_blocks,
     html_or_xml_to_sentences,
 )
 from llm_linguistics.learner.store import get_learner
@@ -118,19 +119,51 @@ def _has_min_hangul(text: str, min_syllables: int = 3) -> bool:
 
 
 def _validate_url_and_resolved_ips(url: str) -> None:
-    """Validate public HTTP/HTTPS URL and verify resolved DNS IPs are non-private."""
+    """Validate public HTTP/HTTPS URL and verify all resolved DNS IPs are globally routable."""
     _validate_public_http_url(url)
     parsed = urllib.parse.urlparse(url)
     host = parsed.hostname or ""
     try:
         infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        return
+    except socket.gaierror as exc:
+        raise ValueError(f"Failed to resolve hostname {host!r}.") from exc
+    if not infos:
+        raise ValueError(f"Hostname {host!r} returned no DNS records.")
     for info in infos:
-        ip_str = info[4][0]
+        ip_str = str(info[4][0])
         ip = ipaddress.ip_address(ip_str)
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+        if (
+            not ip.is_global
+            or ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+        ):
             raise ValueError(f"Hostname {host!r} resolves to non-public IP {ip_str!r}.")
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Validate every HTTP redirect target against SSRF and DNS rebinding rules."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        resolved_target = urllib.parse.urljoin(req.full_url, newurl)
+        _validate_url_and_resolved_ips(resolved_target)
+        return super().redirect_request(req, fp, code, msg, headers, resolved_target)
+
+
+def _safe_http_urlopen(req: urllib.request.Request, timeout_sec: float) -> Any:
+    """Open a public HTTP/HTTPS request with SSRF-checked redirect handling."""
+    opener = urllib.request.build_opener(_SafeRedirectHandler())
+    return opener.open(req, timeout=timeout_sec)
 
 
 def _slack_api_get(
@@ -149,9 +182,12 @@ def _slack_api_get(
             "Accept": "application/json",
         },
     )
-    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
-        raw_bytes = resp.read(2_000_000)
-        payload: dict[str, Any] = json.loads(raw_bytes.decode("utf-8", errors="replace"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
+            raw_bytes = resp.read(2_000_000)
+            payload: dict[str, Any] = json.loads(raw_bytes.decode("utf-8", errors="replace"))
+    except Exception as exc:
+        raise RuntimeError(f"Slack API {endpoint} request failed ({type(exc).__name__}).") from None
 
     if not payload.get("ok"):
         err_code = payload.get("error", "unknown_error")
@@ -200,23 +236,24 @@ def collect_slack_channel(
             checkpoint_cursor=oldest_cursor,
         )
 
-    # Sort oldest -> newest
     sorted_msgs = sorted(raw_messages, key=lambda m: float(m.get("ts", "0")))
     newest_ts = str(sorted_msgs[-1].get("ts", oldest_cursor))
 
-    turns: list[DialogueTurnInput] = []
+    sessions: list[list[DialogueTurnInput]] = []
+    main_turns: list[DialogueTurnInput] = []
     fetched_count = len(sorted_msgs)
 
-    # 1. Main channel sequential turns
     for msg in sorted_msgs:
         if msg.get("subtype"):
             continue
         text = str(msg.get("text", "")).strip()
         user = str(msg.get("user", "slack_user"))
         if _has_min_hangul(text):
-            turns.append(DialogueTurnInput(speaker=user, text=text))
+            main_turns.append(DialogueTurnInput(speaker=user, text=text))
 
-    # 2. Thread reply pairs (bounded by max_threads)
+    if main_turns:
+        sessions.append(main_turns)
+
     if include_threads and max_threads > 0:
         threads_fetched = 0
         for msg in sorted_msgs:
@@ -232,21 +269,24 @@ def collect_slack_channel(
                 )
                 thread_msgs: list[dict[str, Any]] = replies_payload.get("messages", [])
                 fetched_count += max(0, len(thread_msgs) - 1)
+                thread_turns: list[DialogueTurnInput] = []
                 for t_msg in thread_msgs:
                     t_text = str(t_msg.get("text", "")).strip()
                     t_user = str(t_msg.get("user", "slack_user"))
                     if _has_min_hangul(t_text):
-                        turns.append(DialogueTurnInput(speaker=t_user, text=t_text))
+                        thread_turns.append(DialogueTurnInput(speaker=t_user, text=t_text))
+                if thread_turns:
+                    sessions.append(thread_turns)
 
+    total_turns = sum(len(s) for s in sessions)
     ingest_res: DialogueIngestionResult | None = None
-    if turns:
-        ingest_res = get_corpus_engine().ingest_dialogue_turns(
-            turns=turns,
+    if sessions:
+        ingest_res = get_corpus_engine().ingest_dialogue_sessions(
+            sessions=sessions,
             privacy_mode=privacy_mode,
             source_tag="slack",
         )
 
-    # Durable checkpoint only after ingestion succeeds
     cp_store.state.slack_cursors[channel_id] = newest_ts
     cp_store.save()
 
@@ -254,7 +294,7 @@ def collect_slack_channel(
         channel_type="slack",
         target_id=channel_id,
         fetched_messages=fetched_count,
-        constructed_turns=len(turns),
+        constructed_turns=total_turns,
         checkpoint_cursor=newest_ts,
         ingestion_result=ingest_res,
     )
@@ -301,7 +341,9 @@ def collect_telegram_updates(
             raw_bytes = resp.read(2_000_000)
             payload: dict[str, Any] = json.loads(raw_bytes.decode("utf-8", errors="replace"))
     except Exception as exc:
-        raise RuntimeError("Telegram getUpdates request failed.") from exc
+        raise RuntimeError(
+            f"Telegram getUpdates request failed ({type(exc).__name__})."
+        ) from None
 
     if not payload.get("ok"):
         desc = payload.get("description", "unknown_error")
@@ -319,7 +361,7 @@ def collect_telegram_updates(
 
     max_update_id = offset
     chat_streams: dict[str, list[DialogueTurnInput]] = defaultdict(list)
-    reply_pairs: list[DialogueTurnInput] = []
+    sessions: list[list[DialogueTurnInput]] = []
 
     for upd in updates:
         u_id = int(upd.get("update_id", 0))
@@ -336,25 +378,30 @@ def collect_telegram_updates(
         if not _has_min_hangul(text):
             continue
 
-        # Explicit reply_to_message forms a direct adjacency pair (Parent -> Reply)
         reply_to = msg.get("reply_to_message")
         if isinstance(reply_to, dict):
             parent_text = str(reply_to.get("text") or reply_to.get("caption") or "").strip()
             parent_sender = str(reply_to.get("from", {}).get("id", "tg_parent"))
             if _has_min_hangul(parent_text):
-                reply_pairs.append(DialogueTurnInput(speaker=parent_sender, text=parent_text))
-                reply_pairs.append(DialogueTurnInput(speaker=sender, text=text))
+                sessions.append(
+                    [
+                        DialogueTurnInput(speaker=parent_sender, text=parent_text),
+                        DialogueTurnInput(speaker=sender, text=text),
+                    ]
+                )
+                continue
 
         chat_streams[chat_id].append(DialogueTurnInput(speaker=sender, text=text))
 
-    all_turns: list[DialogueTurnInput] = list(reply_pairs)
     for stream in chat_streams.values():
-        all_turns.extend(stream)
+        if stream:
+            sessions.append(stream)
 
+    total_turns = sum(len(s) for s in sessions)
     ingest_res: DialogueIngestionResult | None = None
-    if all_turns:
-        ingest_res = get_corpus_engine().ingest_dialogue_turns(
-            turns=all_turns,
+    if sessions:
+        ingest_res = get_corpus_engine().ingest_dialogue_sessions(
+            sessions=sessions,
             privacy_mode=privacy_mode,
             source_tag="telegram",
         )
@@ -366,7 +413,7 @@ def collect_telegram_updates(
         channel_type="telegram",
         target_id="bot_updates",
         fetched_messages=len(updates),
-        constructed_turns=len(all_turns),
+        constructed_turns=total_turns,
         checkpoint_cursor=str(max_update_id),
         ingestion_result=ingest_res,
     )
@@ -382,7 +429,8 @@ def ingest_telegram_export(
         raise ValueError("messages list must not be empty.")
 
     by_id: dict[int, tuple[str, str]] = {}
-    turns: list[DialogueTurnInput] = []
+    sessions: list[list[DialogueTurnInput]] = []
+    sequential_stream: list[DialogueTurnInput] = []
 
     for msg in messages:
         if msg.get("type", "message") != "message":
@@ -399,15 +447,23 @@ def ingest_telegram_export(
         reply_id = msg.get("reply_to_message_id")
         if isinstance(reply_id, int) and reply_id in by_id:
             p_sender, p_text = by_id[reply_id]
-            turns.append(DialogueTurnInput(speaker=p_sender, text=p_text))
-            turns.append(DialogueTurnInput(speaker=sender, text=text))
+            sessions.append(
+                [
+                    DialogueTurnInput(speaker=p_sender, text=p_text),
+                    DialogueTurnInput(speaker=sender, text=text),
+                ]
+            )
         else:
-            turns.append(DialogueTurnInput(speaker=sender, text=text))
+            sequential_stream.append(DialogueTurnInput(speaker=sender, text=text))
 
+    if sequential_stream:
+        sessions.append(sequential_stream)
+
+    total_turns = sum(len(s) for s in sessions)
     ingest_res: DialogueIngestionResult | None = None
-    if turns:
-        ingest_res = get_corpus_engine().ingest_dialogue_turns(
-            turns=turns,
+    if sessions:
+        ingest_res = get_corpus_engine().ingest_dialogue_sessions(
+            sessions=sessions,
             privacy_mode=privacy_mode,
             source_tag="telegram_export",
         )
@@ -416,7 +472,7 @@ def ingest_telegram_export(
         channel_type="telegram_export",
         target_id=chat_label,
         fetched_messages=len(messages),
-        constructed_turns=len(turns),
+        constructed_turns=total_turns,
         checkpoint_cursor=f"count:{len(messages)}",
         ingestion_result=ingest_res,
     )
@@ -436,7 +492,7 @@ def collect_web_dialogues(
             "User-Agent": "llm-linguistics-mcp/0.4 (+https://github.com/dnr00/llm-linguistics)"
         },
     )
-    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
+    with _safe_http_urlopen(req, timeout_sec=timeout_sec) as resp:
         raw_bytes = resp.read(2_000_000)
         charset = resp.headers.get_content_charset() or "utf-8"
         raw_text = raw_bytes.decode(charset, errors="replace")
@@ -453,13 +509,13 @@ def collect_web_dialogues(
             checkpoint_cursor=content_hash,
         )
 
-    sentences = html_or_xml_to_sentences(raw_text, min_hangul_syllables=5)
-    if not sentences:
-        raise ValueError(f"No Korean sentences with >=5 Hangul syllables found at {url!r}.")
+    blocks = html_or_xml_to_blocks(raw_text, min_hangul_syllables=5)
+    if not blocks:
+        raise ValueError(f"No Korean text blocks with >=5 Hangul syllables found at {url!r}.")
 
     turns = [
-        DialogueTurnInput(speaker=f"web_turn_{idx % 2}", text=sent)
-        for idx, sent in enumerate(sentences)
+        DialogueTurnInput(speaker=f"web_turn_{idx % 2}", text=block)
+        for idx, block in enumerate(blocks)
     ]
     ingest_res = get_corpus_engine().ingest_dialogue_turns(
         turns=turns,
@@ -468,13 +524,14 @@ def collect_web_dialogues(
     )
 
     oov_added: list[str] = []
-    if also_mine_oov:
+    if also_mine_oov and privacy_mode == "public_full":
+        sentences = html_or_xml_to_sentences(raw_text, min_hangul_syllables=5)
         oov_res = get_learner().mine_corpus_oov_words(
-            texts=sentences,
+            texts=sentences or blocks,
             min_cnt=2,
             min_pos_score=0.2,
         )
-        oov_added = oov_res.added_to_dictionary
+        oov_added = [w.word for w in oov_res.newly_registered_words]
 
     cp_store.state.web_content_hashes[url] = content_hash
     cp_store.save()
@@ -482,7 +539,7 @@ def collect_web_dialogues(
     return ChannelCollectionResult(
         channel_type="web",
         target_id=url,
-        fetched_messages=len(sentences),
+        fetched_messages=len(blocks),
         constructed_turns=len(turns),
         checkpoint_cursor=content_hash,
         oov_words_added=oov_added,
