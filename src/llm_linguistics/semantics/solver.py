@@ -8,6 +8,7 @@ from typing import Any
 from z3 import And, Bool, BoolRef, Not, RatNumRef, Real, Solver, is_true, sat
 
 from llm_linguistics.engine import get_kiwi, normalize_kiwi_jamo
+from llm_linguistics.learner import get_learner
 from llm_linguistics.semantics.schemas import (
     ConsistencyReport,
     DeonticModality,
@@ -51,7 +52,37 @@ NUMERIC_BOUND_RE = re.compile(
 )
 
 
-def _detect_deontic_modality(sentence: str, norm_tokens: list[tuple[str, str]]) -> DeonticModality:
+def _pattern_matches_sentence(
+    pattern: str,
+    sentence: str,
+    joined_norm_morphemes: str,
+) -> bool:
+    if pattern in sentence:
+        return True
+    kiwi = get_kiwi()
+    pat_tokens = [
+        normalize_kiwi_jamo(t.form)
+        for t in kiwi.tokenize(pattern)
+        if not (t.tag == "EF" and t.form == "다")
+    ]
+    if not pat_tokens:
+        return False
+    pat_morpheme_str = "".join(pat_tokens)
+    return len(pat_morpheme_str) >= 2 and pat_morpheme_str in joined_norm_morphemes
+
+
+def _detect_deontic_modality(
+    sentence: str,
+    norm_tokens: list[tuple[str, str]],
+    joined_norm_morphemes: str,
+) -> DeonticModality:
+    # Check online-learned semantic modality patterns first (surface + morpheme stem match)
+    for pat_entry in get_learner().state.semantic_patterns.values():
+        if pat_entry.modality != "NONE" and _pattern_matches_sentence(
+            pat_entry.pattern, sentence, joined_norm_morphemes
+        ):
+            return pat_entry.modality
+
     # Check for double-negation obligation: '-지 않을 수 없다' / '-지 아니할 수 없다' -> MUST
     for i in range(len(norm_tokens) - 3):
         f0, t0 = norm_tokens[i]
@@ -118,6 +149,7 @@ def extract_logical_markers(sentences: list[str]) -> LogicalMarkerExtractionResu
         raise ValueError("sentences list must not be empty.")
 
     kiwi = get_kiwi()
+    learned_patterns = get_learner().state.semantic_patterns
     items: list[SentenceLogicalMarkers] = []
     double_negation_indices: list[int] = []
     exclusive_constraint_indices: list[int] = []
@@ -151,9 +183,18 @@ def extract_logical_markers(sentences: list[str]) -> LogicalMarkerExtractionResu
             if tok.tag == "EC" and any(norm_form.endswith(p) for p in ("면", "다면", "라면")):
                 conditionals.append(norm_form)
 
+        joined_norm_morphemes = "".join(f for f, _ in norm_tokens)
+
         for phrase in EXCLUSIVE_PHRASES:
             if phrase in sent and phrase not in exclusives:
                 exclusives.append(phrase)
+
+        for pat_entry in learned_patterns.values():
+            if pat_entry.is_exclusive and _pattern_matches_sentence(
+                pat_entry.pattern, sent, joined_norm_morphemes
+            ):
+                if pat_entry.pattern not in exclusives:
+                    exclusives.append(pat_entry.pattern)
 
         for cond_word in ("경우", "한하여", "조건으로", "때에만"):
             if cond_word in sent and cond_word not in conditionals:
@@ -174,7 +215,9 @@ def extract_logical_markers(sentences: list[str]) -> LogicalMarkerExtractionResu
                 exclusive_markers=exclusives,
                 negations=negations,
                 is_double_negation=is_double_neg,
-                deontic_modality=_detect_deontic_modality(sent, norm_tokens),
+                deontic_modality=_detect_deontic_modality(
+                    sent, norm_tokens, joined_norm_morphemes
+                ),
                 conditional_connectives=conditionals,
                 numeric_phrases=_extract_numeric_phrases(sent),
             )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from llm_linguistics.engine import get_kiwi, normalize_kiwi_jamo
+from llm_linguistics.learner import get_learner
 from llm_linguistics.pragmatics.schemas import (
     DialogueTurnInput,
     DiscourseAnalysisResult,
@@ -162,13 +163,35 @@ def _classify_sentence_type(
     return "declarative"
 
 
-def _detect_markers(text: str) -> dict[str, list[str]]:
+def _detect_markers(text: str) -> tuple[dict[str, list[str]], float]:
     found: dict[str, list[str]] = {}
+    weights: list[float] = []
+    learned_cues = get_learner().state.pragmatic_cues
+
     for category, patterns in PRAGMATIC_MARKER_LEXICON.items():
-        matches = [pat for pat in patterns if pat in text]
+        matches: list[str] = []
+        for pat in patterns:
+            key = f"{category}:{pat}"
+            learned = learned_cues.get(key)
+            if learned is not None and learned.is_suppressed:
+                continue
+            if pat in text:
+                matches.append(pat)
+                weights.append(learned.posterior_weight if learned is not None else 0.85)
         if matches:
             found[category] = matches
-    return found
+
+    for cue in learned_cues.values():
+        if not cue.is_active:
+            continue
+        if cue.phrase in text:
+            cat_list = found.setdefault(cue.category, [])
+            if cue.phrase not in cat_list:
+                cat_list.append(cue.phrase)
+                weights.append(cue.posterior_weight)
+
+    confidence = round(sum(weights) / len(weights), 4) if weights else 1.0
+    return found, confidence
 
 
 def _infer_illocutionary_force(
@@ -274,7 +297,7 @@ def analyze_discourse(utterances: list[DialogueTurnInput]) -> DiscourseAnalysisR
             politeness_drop_turns.append(idx)
 
         sentence_type = _classify_sentence_type(turn.text, ef_forms, speech_level)
-        markers = _detect_markers(turn.text)
+        markers, confidence = _detect_markers(turn.text)
         illocutionary_force, note = _infer_illocutionary_force(sentence_type, markers)
 
         if illocutionary_force in (
@@ -296,6 +319,7 @@ def analyze_discourse(utterances: list[DialogueTurnInput]) -> DiscourseAnalysisR
                 speaker_politeness_shift=speaker_shift,
                 sentence_type=sentence_type,
                 illocutionary_force=illocutionary_force,
+                confidence_score=confidence,
                 detected_markers=markers,
                 final_ending_morphemes=ef_forms,
                 pragmatic_note=note,

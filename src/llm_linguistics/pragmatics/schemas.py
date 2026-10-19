@@ -58,6 +58,12 @@ class UtterancePragmatics(BaseModel):
     )
     sentence_type: SentenceType
     illocutionary_force: IllocutionaryForce
+    confidence_score: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Posterior confidence of inferred illocutionary force",
+    )
     detected_markers: dict[str, list[str]]
     final_ending_morphemes: list[str]
     pragmatic_note: str
