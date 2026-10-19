@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 from fastmcp import FastMCP
@@ -29,9 +30,12 @@ from llm_linguistics.morph import (
 )
 from llm_linguistics.morph.schemas import BatchimRule
 from llm_linguistics.pragmatics import (
+    DialogueIngestionResult,
     DialogueTurnInput,
     DiscourseAnalysisResult,
+    PragmaticCorpusStats,
     analyze_discourse,
+    get_corpus_engine,
 )
 from llm_linguistics.semantics import (
     AutoVerificationReport,
@@ -46,11 +50,11 @@ from llm_linguistics.semantics import (
 mcp = FastMCP(
     name="llm-linguistics",
     instructions=(
-        "Deterministic Korean linguistic middleware and online adaptation server for LLM agents: "
+        "Deterministic Korean linguistic middleware and self-evolving adaptation server: "
         "(1) morph_* tools for exact Hangul syllable/Jamo constraint verification, "
         "allomorphic Josa attachment, and irregular predicate/compound normalization for RAG; "
-        "(2) pragmatics_analyze_discourse for 6-tier Korean speech-level tracking, "
-        "honorific shifts, and Bayesian indirect speech-act detection; "
+        "(2) pragmatics_* tools for 6-tier Korean speech-level tracking, honorific shifts, "
+        "morphological N-gram log-odds classification, and reaction-bootstrapped corpus growth; "
         "(3) semantics_* tools for scope/quantifier/negation extraction, auto-formalization, "
         "and Z3 theorem prover verification of policy/contract rule consistency; "
         "(4) learn_* tools for online URL/RSS corpus ingestion, OOV word mining, Bayesian "
@@ -100,9 +104,27 @@ def morph_normalize_for_rag(text: str) -> RagNormalizedOutput:
 @mcp.tool()
 def pragmatics_analyze_discourse(
     utterances: list[DialogueTurnInput],
+    auto_harvest_reactions: bool = False,
 ) -> DiscourseAnalysisResult:
     """Analyze 6-tier Korean speech levels, honorifics (-시-), shifts, and indirect speech acts."""
-    return analyze_discourse(utterances=utterances)
+    return analyze_discourse(
+        utterances=utterances,
+        auto_harvest_reactions=auto_harvest_reactions,
+    )
+
+
+@mcp.tool()
+def pragmatics_ingest_dialogues(
+    utterances: list[DialogueTurnInput],
+) -> DialogueIngestionResult:
+    """Accumulate dialogue turns via reaction bootstrapping and retrain N-gram weights."""
+    return get_corpus_engine().ingest_dialogue_turns(turns=utterances)
+
+
+@mcp.tool()
+def pragmatics_get_corpus_stats(top_k: int = 8) -> PragmaticCorpusStats:
+    """Return pragmatics corpus counts and top morphological N-gram log-odds features."""
+    return get_corpus_engine().get_stats(top_k=top_k)
 
 
 @mcp.tool()
@@ -198,8 +220,14 @@ def learn_semantic_pattern(
 
 
 def main() -> None:
-    """Entrypoint for running the FastMCP server over stdio."""
-    mcp.run()
+    """Entrypoint supporting both local stdio and remote streamable-http (e.g. Railway)."""
+    transport = os.environ.get("MCP_TRANSPORT", "stdio").strip().lower()
+    if transport in ("http", "streamable-http"):
+        host = os.environ.get("HOST", "0.0.0.0")
+        port = int(os.environ.get("PORT", "8000"))
+        mcp.run(transport="streamable-http", host=host, port=port)
+    else:
+        mcp.run()
 
 
 if __name__ == "__main__":

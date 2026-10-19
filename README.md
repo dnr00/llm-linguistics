@@ -69,7 +69,7 @@ args = ["--directory", "/path/to/llm-linguistics", "run", "llm-linguistics-mcp"]
 
 ---
 
-## 제공 MCP 도구 (12종)
+## 제공 MCP 도구 (14종)
 
 ### 1. 형태론 (`morph_*`)
 * `morph_verify_constraints`: 한글 음절 수, 공백 제외 글자 수, 받침 제약(`none` | `all` | `only_sonorant`), 초성 시퀀스(`expected_choseong_sequence`), 어절별 모음조화 준수 여부를 검사하고 위반한 정확한 음절 인덱스를 반환합니다.
@@ -77,7 +77,9 @@ args = ["--directory", "/path/to/llm-linguistics", "run", "llm-linguistics-mcp"]
 * `morph_normalize_for_rag`: `ㅂ/ㄷ` 등 불규칙 활용 용언(`추워서` → `춥다`, `걸었다` → `걷다`)을 기본형으로 복원하고 복합어를 하위 어근으로 쪼개어 Hybrid RAG 인덱싱용 쿼리를 생성합니다.
 
 ### 2. 화용론 (`pragmatics_*`)
-* `pragmatics_analyze_discourse`: 대화 턴(`speaker`, `text`) 목록을 분석해 발화별 6단계 화계(`formal_high` 하십시오체 ~ `informal_low` 해체), 주체 높임(`-시-`), 화계 강등 지점, 간접화행(`indirect_refusal_or_deferral`, `indirect_request_or_urge`, `hedged_dissent_or_reservation`) 및 신뢰도 점수를 반환합니다.
+* `pragmatics_analyze_discourse`: 대화 턴(`speaker`, `text`) 목록을 분석해 발화별 6단계 화계(`formal_high` 하십시오체 ~ `informal_low` 해체), 주체 높임(`-시-`), 화계 강등 지점, 간접화행(`indirect_refusal_or_deferral`, `indirect_request_or_urge`, `hedged_dissent_or_reservation`) 및 신뢰도 점수를 반환합니다. `auto_harvest_reactions=True`로 호출하면 후속 턴의 반응(수긍·실망·사과 등)에서 직전 턴의 화용론 라벨을 자동 역추적해 코퍼스에 누적합니다.
+* `pragmatics_ingest_dialogues`: 대화 로그를 입력받아 인접쌍 반응 부트스트래핑(Reaction Bootstrapping)으로 화용론 라벨을 부착해 `data/pragmatics_corpus.jsonl`에 추가하고, 디리클레 스무딩 형태소 N-gram 로그오즈 가중치(`data/pragmatics_weights.json`)를 즉시 재학습합니다.
+* `pragmatics_get_corpus_stats`: 누적된 화용론 코퍼스 레코드 수와 발화 의도별 상위 형태소 N-gram 가중치를 조회합니다.
 
 ### 3. 의미론 (`semantics_*`)
 * `semantics_extract_logical_markers`: 문장별 전칭/존재 양화사, 배타 표현, 이중 부정 여부, 의무·금지·허용 양상(`MUST` | `MUST_NOT` | `MAY`), 수치 비교 구문(`7일 이내` → `<= 7.0`)을 추출합니다.
@@ -138,6 +140,8 @@ report = auto_verify_korean_sentences([
 
 ---
 
-## 온라인 학습 상태 저장소
+## 온라인 학습 상태 및 코퍼스 저장소
 
-학습된 사용자 사전, 담화 표지 가중치, 의미론 패턴은 기본적으로 `~/.llm_linguistics/learned_state.json`에 원자적(Atomic rename)으로 저장되며 서버 재시작 시 자동 로드됩니다. 저장 경로를 바꾸려면 `LLM_LINGUISTICS_STATE_PATH` 환경변수를 지정하면 됩니다.
+* **화용론 진화 코퍼스 (`data/pragmatics_corpus.jsonl`, `data/pragmatics_weights.json`)**: 레포지토리에 함께 버전 관리되는 대화 코퍼스와 형태소 N-gram 가중치 파일입니다. `pragmatics_ingest_dialogues` 호출 또는 `pragmatics_analyze_discourse(..., auto_harvest_reactions=True)` 실행 시 자동으로 코퍼스가 누적되고 가중치가 재계산됩니다. 경로를 변경하려면 `LLM_LINGUISTICS_PRAGMATICS_CORPUS_PATH`와 `LLM_LINGUISTICS_PRAGMATICS_WEIGHTS_PATH` 환경변수를 지정합니다.
+* **로컬 사용자 사전 및 피드백 (`~/.llm_linguistics/learned_state.json`)**: 발굴된 미등록어(OOV), 개별 표지 베이지안 가중치, 의미론 패턴이 원자적(Atomic rename)으로 저장되며 재시작 시 자동 로드됩니다(`LLM_LINGUISTICS_STATE_PATH`로 변경 가능).
+* **원격 HTTP MCP 서버 실행 (Railway 등)**: 환경변수 `MCP_TRANSPORT=http`와 `PORT`(기본값 `8000`)를 설정해 실행하면 `streamable-http` 모드로 기동되어 여러 기기에서 단일 코퍼스를 공유할 수 있습니다.
