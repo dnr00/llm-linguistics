@@ -566,6 +566,16 @@ def test_autopilot_billing_isolation_and_distillation_cycle(
     with pytest.raises(RuntimeError, match="Billing guard tripped"):
         build_billing_isolated_env(dirty_env, claude_settings_path=bad_settings)
 
+    helper_settings = temp_dir / "helper_settings.json"
+    helper_settings.write_text('{"apiKeyHelper": "/bin/echo sk-ant-123"}', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="apiKeyHelper"):
+        build_billing_isolated_env(dirty_env, claude_settings_path=helper_settings)
+
+    corrupt_settings = temp_dir / "corrupt_settings.json"
+    corrupt_settings.write_text("{corrupt json", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="failed to parse"):
+        build_billing_isolated_env(dirty_env, claude_settings_path=corrupt_settings)
+
     # 2. Autopilot distillation cycle + zero-token idle skip + circuit breaker
     pub_corpus = temp_dir / "pub.jsonl"
     priv_corpus = temp_dir / "priv.jsonl"
@@ -580,7 +590,7 @@ def test_autopilot_billing_isolation_and_distillation_cycle(
         private_corpus_path=priv_corpus,
         weights_path=weights_file,
     )
-    reset_checkpoint_store_for_testing(path=checkpoints_file)
+    cp_store = reset_checkpoint_store_for_testing(path=checkpoints_file)
     reset_autopilot_store_for_testing(path=ap_state_file)
     reset_learner_for_testing(state_path=learner_file)
 
@@ -653,6 +663,35 @@ def test_autopilot_billing_isolation_and_distillation_cycle(
     assert rep2.status == "idle_no_new_data"
     assert rep2.llm_calls_made == 0
 
+    # Multi-URL batch cap: when URL 1 fills max_utterances=1, URL 2 is NOT checkpointed yet
+    url_a = "https://example.com/multi_a"
+    url_b = "https://example.com/multi_b"
+    page_by_url = {
+        url_a: (
+            "<html><body><p>이번 주 금요일 오후에 서버실 냉방 설비 점검이 예정되어 있습니다.</p>"
+            "</body></html>"
+        ).encode(),
+        url_b: (
+            "<html><body><p>내일 정오부터 구내식당 점심 배식표 구성이 새롭게 바뀝니다.</p>"
+            "</body></html>"
+        ).encode(),
+    }
+    monkeypatch.setattr(
+        ap_mod,
+        "_safe_http_urlopen",
+        lambda req, timeout_sec: _FakeWebResp(page_by_url[req.full_url]),
+    )
+    multi_cfg = CollectSourcesConfig(web_urls=[url_a, url_b])
+    rep_multi_1 = run_autopilot_cycle(config=multi_cfg, max_utterances=1)
+    assert rep_multi_1.status == "distilled"
+    assert url_a in cp_store.state.web_content_hashes
+    assert url_b not in cp_store.state.web_content_hashes
+
+    # Next cycle skips url_a and processes url_b
+    rep_multi_2 = run_autopilot_cycle(config=multi_cfg, max_utterances=1)
+    assert rep_multi_2.status == "distilled"
+    assert url_b in cp_store.state.web_content_hashes
+
     # 3 consecutive LLM failures open circuit breaker
     unlabelled_html = (
         "<html><body><p>이번 주말에 사내 네트워크 정기 점검이 진행됩니다.</p></body></html>"
@@ -695,6 +734,115 @@ def test_autopilot_billing_isolation_and_distillation_cycle(
     reset_learner_for_testing()
 
 
+def test_invoke_claude_teacher_subprocess_and_envelope_guards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+    import subprocess
 
+    import llm_linguistics.autopilot as ap_mod
+    from llm_linguistics.autopilot import invoke_claude_teacher
 
+    monkeypatch.setattr(ap_mod, "build_billing_isolated_env", lambda: {"PATH": "/usr/bin"})
+    monkeypatch.setattr(ap_mod, "resolve_claude_binary", lambda env: "/usr/local/bin/claude")
 
+    class _FakePopen:
+        def __init__(
+            self,
+            stdout_payload: str,
+            returncode: int = 0,
+            raise_timeout: bool = False,
+        ) -> None:
+            self._stdout = stdout_payload
+            self.returncode = returncode
+            self._raise_timeout = raise_timeout
+            self.pid = 424242
+            self.waited = False
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            if self._raise_timeout:
+                raise subprocess.TimeoutExpired(cmd=["claude"], timeout=timeout or 1.0)
+            return self._stdout, ""
+
+        def kill(self) -> None:
+            pass
+
+        def wait(self) -> int:
+            self.waited = True
+            return self.returncode
+
+    # 1. Valid `claude -p --output-format json` envelope + hallucinated enum filtering
+    inner_json = json.dumps({
+        "pragmatic_labels": [
+            {"index": 0, "label": "indirect_refusal_or_deferral", "confidence": 0.88},
+            {"index": 0, "label": "invalid_hallucinated_label", "confidence": 0.99},
+            {"index": 99, "label": "indirect_refusal_or_deferral", "confidence": 0.95},
+        ],
+        "pragmatic_cues": [
+            {"phrase": "추후 재논의", "category": "indirect_refusal_cue"},
+            {"phrase": "x", "category": "indirect_refusal_cue"},
+        ],
+        "semantic_patterns": [
+            {"pattern": "반드시 준수하여야", "modality": "MUST", "is_exclusive": True},
+            {"pattern": "무시됨", "modality": "UNKNOWN_MODALITY", "is_exclusive": False},
+        ],
+    })
+    envelope = json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": f"```json\n{inner_json}\n```",
+    })
+    monkeypatch.setattr(
+        ap_mod.subprocess,
+        "Popen",
+        lambda *a, **kw: _FakePopen(stdout_payload=envelope),
+    )
+    payload = invoke_claude_teacher(["이번 안건은 추후 재논의하기로 합시다."])
+    assert len(payload.pragmatic_labels) == 1
+    assert payload.pragmatic_labels[0].label == "indirect_refusal_or_deferral"
+    assert len(payload.pragmatic_cues) == 1
+    assert payload.pragmatic_cues[0].phrase == "추후 재논의"
+    assert len(payload.semantic_patterns) == 1
+    assert payload.semantic_patterns[0].modality == "MUST"
+
+    # 2. `is_error: true` envelope with exit code 0 must raise RuntimeError
+    err_envelope = json.dumps({
+        "type": "result",
+        "subtype": "error_max_turns",
+        "is_error": True,
+    })
+    monkeypatch.setattr(
+        ap_mod.subprocess,
+        "Popen",
+        lambda *a, **kw: _FakePopen(stdout_payload=err_envelope),
+    )
+    with pytest.raises(RuntimeError, match="error envelope"):
+        invoke_claude_teacher(["테스트 문장입니다."])
+
+    # 3. Arbitrary JSON object missing distillation schema keys must raise RuntimeError
+    unrelated_json = json.dumps({"unrelated_key": 123})
+    monkeypatch.setattr(
+        ap_mod.subprocess,
+        "Popen",
+        lambda *a, **kw: _FakePopen(stdout_payload=unrelated_json),
+    )
+    with pytest.raises(RuntimeError, match="missing expected distillation schema keys"):
+        invoke_claude_teacher(["테스트 문장입니다."])
+
+    # 4. Subprocess timeout kills process group via os.killpg and raises RuntimeError
+    killed_pgids: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        ap_mod.os,
+        "killpg",
+        lambda pgid, sig: killed_pgids.append((pgid, sig)),
+    )
+    monkeypatch.setattr(
+        ap_mod.subprocess,
+        "Popen",
+        lambda *a, **kw: _FakePopen(stdout_payload="", raise_timeout=True),
+    )
+    with pytest.raises(RuntimeError, match="timed out"):
+        invoke_claude_teacher(["테스트 문장입니다."], timeout_sec=0.5)
+    assert len(killed_pgids) == 1
+    assert killed_pgids[0][0] == 424242

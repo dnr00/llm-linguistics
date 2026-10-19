@@ -220,22 +220,31 @@ def build_billing_isolated_env(
     if s_path.exists():
         try:
             settings_data = json.loads(s_path.read_text(encoding="utf-8"))
-            settings_env = settings_data.get("env", {})
-            if isinstance(settings_env, dict):
-                forbidden = (
-                    "ANTHROPIC_API_KEY",
-                    "ANTHROPIC_AUTH_TOKEN",
-                    "CLAUDE_CODE_USE_BEDROCK",
-                    "CLAUDE_CODE_USE_VERTEX",
-                )
-                for f_key in forbidden:
-                    if settings_env.get(f_key):
-                        raise RuntimeError(
-                            f"Billing guard tripped: {f_key} is set in {s_path}. "
-                            "Refusing to spawn child claude process outside subscription."
-                        )
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Billing guard tripped: failed to parse {s_path} as valid JSON."
+            ) from exc
+        if not isinstance(settings_data, dict):
+            raise RuntimeError(
+                f"Billing guard tripped: {s_path} root must be a JSON object."
+            )
+        if settings_data.get("apiKeyHelper"):
+            raise RuntimeError(
+                f"Billing guard tripped: apiKeyHelper is configured in {s_path}. "
+                "Refusing to spawn child claude process outside subscription."
+            )
+        settings_env = settings_data.get("env", {})
+        if settings_env is not None and not isinstance(settings_env, dict):
+            raise RuntimeError(
+                f"Billing guard tripped: {s_path} 'env' field must be a JSON object."
+            )
+        if isinstance(settings_env, dict):
+            for f_key, f_val in settings_env.items():
+                if f_key.startswith(("ANTHROPIC_", "CLAUDE_CODE_USE_")) and f_val:
+                    raise RuntimeError(
+                        f"Billing guard tripped: {f_key} is set in {s_path}. "
+                        "Refusing to spawn child claude process outside subscription."
+                    )
 
     return scrubbed
 
@@ -257,10 +266,16 @@ def _extract_json_object(raw_text: str) -> dict[str, Any]:
     try:
         outer = json.loads(stripped)
         if isinstance(outer, dict):
+            if outer.get("is_error"):
+                detail = outer.get("subtype") or outer.get("result") or outer
+                raise RuntimeError(f"Claude teacher returned error envelope: {detail}")
             # If this is `claude -p --output-format json` envelope, unwrap `result`
             if "result" in outer and isinstance(outer["result"], str):
                 inner_text = outer["result"].strip()
                 return _extract_json_object(inner_text)
+            if outer.get("type") == "result":
+                detail = outer.get("subtype") or outer
+                raise RuntimeError(f"Claude teacher envelope missing string result: {detail}")
             return outer
     except json.JSONDecodeError:
         pass
@@ -268,11 +283,15 @@ def _extract_json_object(raw_text: str) -> dict[str, Any]:
     # Strip markdown code fences if present
     fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, flags=re.DOTALL)
     if fenced:
-        return json.loads(fenced.group(1))
+        parsed_fenced = json.loads(fenced.group(1))
+        if isinstance(parsed_fenced, dict):
+            return parsed_fenced
 
     brace_match = re.search(r"(\{.*\})", stripped, flags=re.DOTALL)
     if brace_match:
-        return json.loads(brace_match.group(1))
+        parsed_brace = json.loads(brace_match.group(1))
+        if isinstance(parsed_brace, dict):
+            return parsed_brace
 
     raise ValueError("LLM response did not contain a valid JSON object.")
 
@@ -356,9 +375,23 @@ def invoke_claude_teacher(
         raise RuntimeError(f"Claude teacher exited with code {proc.returncode}: {err_snip}")
 
     raw_dict = _extract_json_object(stdout_str)
+    expected_keys = ("pragmatic_labels", "pragmatic_cues", "semantic_patterns")
+    if not any(k in raw_dict for k in expected_keys):
+        raise RuntimeError("LLM response JSON is missing expected distillation schema keys.")
+
+    raw_labels = raw_dict.get("pragmatic_labels") or []
+    raw_cues = raw_dict.get("pragmatic_cues") or []
+    raw_patterns = raw_dict.get("semantic_patterns") or []
+    if not (
+        isinstance(raw_labels, list)
+        and isinstance(raw_cues, list)
+        and isinstance(raw_patterns, list)
+    ):
+        raise RuntimeError("LLM response distillation schema fields must be lists.")
+
     # Filter to valid enum values before validation so minor teacher hallucinations don't crash
     clean_labels: list[dict[str, Any]] = []
-    for item in raw_dict.get("pragmatic_labels", []):
+    for item in raw_labels:
         if (
             isinstance(item, dict)
             and isinstance(item.get("index"), int)
@@ -368,7 +401,7 @@ def invoke_claude_teacher(
             clean_labels.append(item)
 
     clean_cues: list[dict[str, Any]] = []
-    for item in raw_dict.get("pragmatic_cues", []):
+    for item in raw_cues:
         if (
             isinstance(item, dict)
             and isinstance(item.get("phrase"), str)
@@ -378,7 +411,7 @@ def invoke_claude_teacher(
             clean_cues.append({"phrase": item["phrase"].strip(), "category": item["category"]})
 
     clean_patterns: list[dict[str, Any]] = []
-    for item in raw_dict.get("semantic_patterns", []):
+    for item in raw_patterns:
         if (
             isinstance(item, dict)
             and isinstance(item.get("pattern"), str)
@@ -439,12 +472,15 @@ def run_autopilot_cycle(
     corpus_engine = get_corpus_engine()
     learner = get_learner()
 
+    effective_limit = max(1, min(max_utterances, MAX_UTTERANCES_PER_LLM_CALL))
     candidate_utterances: list[tuple[str, PrivacyMode]] = []
     pending_web_hashes: dict[str, str] = {}
     oov_added_count = 0
 
     # 1. Fetch new Web/RSS blocks and extract unlabelled candidates
     for url in config.web_urls:
+        if len(candidate_utterances) >= effective_limit:
+            break
         try:
             _validate_url_and_resolved_ips(url)
             req = __import__("urllib.request").request.Request(
@@ -468,6 +504,8 @@ def run_autopilot_cycle(
                 )
                 oov_added_count += len(oov_res.newly_registered_words)
 
+            started_with_prior = len(candidate_utterances) > 0
+            truncated_mid_url = False
             for s_text in (sentences or blocks):
                 scrubbed = scrub_pii(s_text)
                 if len(scrubbed) < 8 or len(scrubbed) > 160:
@@ -478,11 +516,15 @@ def run_autopilot_cycle(
                     auto_harvest_reactions=False,
                 )
                 if det.utterances[0].illocutionary_force.startswith("literal_"):
-                    candidate_utterances.append((scrubbed, config.web_privacy_mode))
-                    if len(candidate_utterances) >= max_utterances:
+                    if len(candidate_utterances) >= effective_limit:
+                        truncated_mid_url = True
                         break
+                    candidate_utterances.append((scrubbed, config.web_privacy_mode))
 
-            pending_web_hashes[url] = content_hash
+            # If a secondary URL was truncated only because an earlier URL took part of the batch,
+            # leave its hash un-checkpointed so the next cycle gives it a full batch.
+            if not (started_with_prior and truncated_mid_url):
+                pending_web_hashes[url] = content_hash
         except Exception as exc:
             logger.warning("Autopilot web source skipped url=%s: %s", url, exc)
 
@@ -521,7 +563,7 @@ def run_autopilot_cycle(
             logger.warning("Autopilot Telegram export skipped file=%s: %s", exp_file, exc)
 
     now_iso = datetime.now(UTC).isoformat()
-    batch = candidate_utterances[: min(max_utterances, MAX_UTTERANCES_PER_LLM_CALL)]
+    batch = candidate_utterances[:effective_limit]
 
     if not batch:
         for u, h in pending_web_hashes.items():
