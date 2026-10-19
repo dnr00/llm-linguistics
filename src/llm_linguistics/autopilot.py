@@ -329,7 +329,7 @@ def build_teacher_prompt(utterances: list[str]) -> str:
 
 def invoke_claude_teacher(
     utterances: list[str],
-    timeout_sec: float = 60.0,
+    timeout_sec: float = 90.0,
 ) -> TeacherDistillationPayload:
     """Invoke billing-isolated `claude -p` in 1-turn mode to label Korean utterances."""
     if not utterances:
@@ -342,18 +342,23 @@ def invoke_claude_teacher(
     cmd = [
         claude_bin,
         "-p",
-        prompt,
+        "--safe-mode",
+        "--strict-mcp-config",
+        "--no-session-persistence",
+        "--model",
+        "sonnet",
+        "--effort",
+        "low",
         "--output-format",
         "json",
         "--max-turns",
         "1",
-        "--tools",
-        "",
+        "--tools=",
     ]
 
     proc = subprocess.Popen(
         cmd,
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
@@ -361,7 +366,7 @@ def invoke_claude_teacher(
         start_new_session=True,
     )
     try:
-        stdout_str, stderr_str = proc.communicate(timeout=timeout_sec)
+        stdout_str, stderr_str = proc.communicate(input=prompt, timeout=timeout_sec)
     except subprocess.TimeoutExpired as exc:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -435,7 +440,7 @@ def run_autopilot_cycle(
     config: CollectSourcesConfig | None = None,
     max_utterances: int = MAX_UTTERANCES_PER_LLM_CALL,
     http_timeout_sec: float = 10.0,
-    llm_timeout_sec: float = 60.0,
+    llm_timeout_sec: float = 90.0,
 ) -> AutopilotRunReport:
     """Execute one bounded autonomous cycle: fetch -> LLM teacher -> local distillation."""
     logger = _configure_logger()

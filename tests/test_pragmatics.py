@@ -759,7 +759,11 @@ def test_invoke_claude_teacher_subprocess_and_envelope_guards(
             self.pid = 424242
             self.waited = False
 
-        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+        def communicate(
+            self,
+            input: str | None = None,
+            timeout: float | None = None,
+        ) -> tuple[str, str]:
             if self._raise_timeout:
                 raise subprocess.TimeoutExpired(cmd=["claude"], timeout=timeout or 1.0)
             return self._stdout, ""
