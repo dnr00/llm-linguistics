@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from llm_linguistics.engine import get_kiwi, normalize_kiwi_jamo
 from llm_linguistics.learner import get_learner
-from llm_linguistics.pragmatics.corpus_learner import get_corpus_engine
+from llm_linguistics.pragmatics.corpus_learner import PrivacyMode, get_corpus_engine
 from llm_linguistics.pragmatics.schemas import (
     DialogueTurnInput,
     DiscourseAnalysisResult,
@@ -272,13 +272,18 @@ def _compute_shift(prev_rank: int | None, curr_rank: int) -> PolitenessShift:
 def analyze_discourse(
     utterances: list[DialogueTurnInput],
     auto_harvest_reactions: bool = False,
+    privacy_mode: PrivacyMode = "features_only",
 ) -> DiscourseAnalysisResult:
     """Deterministically analyze speech levels, honorific shifts, and pragmatic markers."""
     if not utterances:
         raise ValueError("utterances list must not be empty.")
 
     if auto_harvest_reactions and len(utterances) >= 2:
-        get_corpus_engine().ingest_dialogue_turns(utterances)
+        get_corpus_engine().ingest_dialogue_turns(
+            utterances,
+            privacy_mode=privacy_mode,
+            source_tag="live_session",
+        )
 
     kiwi = get_kiwi()
     results: list[UtterancePragmatics] = []

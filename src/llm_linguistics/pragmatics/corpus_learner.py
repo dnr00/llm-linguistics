@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -15,7 +18,10 @@ from llm_linguistics.pragmatics.schemas import DialogueTurnInput, IllocutionaryF
 
 REPO_DATA_DIR = Path(__file__).resolve().parents[3] / "data"
 DEFAULT_CORPUS_PATH = REPO_DATA_DIR / "pragmatics_corpus.jsonl"
+DEFAULT_PRIVATE_CORPUS_PATH = Path.home() / ".llm_linguistics" / "private_corpus.jsonl"
 DEFAULT_WEIGHTS_PATH = REPO_DATA_DIR / "pragmatics_weights.json"
+
+PrivacyMode = Literal["public_full", "private_scrubbed", "features_only"]
 
 TARGET_PRAGMATIC_CLASSES: tuple[IllocutionaryForce, ...] = (
     "indirect_refusal_or_deferral",
@@ -26,12 +32,17 @@ TARGET_PRAGMATIC_CLASSES: tuple[IllocutionaryForce, ...] = (
 
 REFUSAL_REACTION_SIGNALS: tuple[str, ...] = (
     "아쉽네요",
+    "아쉽지만",
     "어쩔 수 없",
     "다음 기회에",
     "보류하시는",
     "보류하겠",
     "내부 논의 결과 기다리",
     "다음 분기에",
+    "안 되는군요",
+    "어려우시군요",
+    "일정 나오면 알려주",
+    "나중에 다시 말씀",
 )
 
 URGE_REACTION_SIGNALS: tuple[str, ...] = (
@@ -40,32 +51,79 @@ URGE_REACTION_SIGNALS: tuple[str, ...] = (
     "지금 바로 확인해서",
     "곧 회신드리",
     "오늘 중으로 바로",
+    "제가 처리할게요",
+    "바로 해둘게요",
+    "금방 확인해 드릴게요",
+    "늦어서 죄송",
+    "지금 챙기겠습니다",
 )
 
 DISSENT_REACTION_SIGNALS: tuple[str, ...] = (
     "우려하시는 부분",
     "수정안을 같이",
     "하루 더 검증해",
+    "리스크가 있겠네요",
+    "다시 검토해 볼게요",
+    "지적해주신 대로",
 )
 
-FEATURE_POS_TAGS: frozenset[str] = frozenset({
+PRESSURE_REACTION_SIGNALS: tuple[str, ...] = (
+    "죄송합니다 지금",
+    "제 불찰",
+    "변명의 여지",
+    "시정하겠습니다",
+    "다시는 이런 일",
+)
+
+PUBLIC_FEATURE_POS_TAGS: frozenset[str] = frozenset({
     "NNG", "NNP", "VV", "VA", "MAG", "IC",
+})
+
+PRIVATE_FEATURE_POS_TAGS: frozenset[str] = frozenset({
+    "NNG", "VV", "VA", "MAG", "IC",
 })
 
 STOP_MORPHEMES: frozenset[str] = frozenset({
     "이", "하", "있", "되", "것", "수", "들", "그", "나", "우리", "저", "네", "예",
     "확인", "내용", "제안", "말씀", "드리", "주", "일", "건", "번", "이번", "지금",
+    "멘션", "이메일", "전화번호", "보안토큰", "핸들", "URL",
 })
+
+_SLACK_MENTION_RE = re.compile(r"<[@#][A-Z0-9]+(?:\|[^>]+)?>")
+_URL_RE = re.compile(r"https?://\S+")
+_EMAIL_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
+_PHONE_RE = re.compile(r"(?:01[016789]|02|0[3-6][1-5])-?\d{3,4}-?\d{4}")
+_SECRET_TOKEN_RE = re.compile(r"(?:0x[a-fA-F0-9]{16,}|xox[baprs]-[a-zA-Z0-9-]+)")
+_HANDLE_RE = re.compile(r"(?<!\w)@[a-zA-Z0-9_]{3,}")
+
+
+def scrub_pii(text: str) -> str:
+    """Redact mentions, URLs, emails, phone numbers, tokens, and handles from raw text."""
+    cleaned = _SLACK_MENTION_RE.sub("[멘션]", text)
+    cleaned = _URL_RE.sub("[URL]", cleaned)
+    cleaned = _EMAIL_RE.sub("[이메일]", cleaned)
+    cleaned = _PHONE_RE.sub("[전화번호]", cleaned)
+    cleaned = _SECRET_TOKEN_RE.sub("[보안토큰]", cleaned)
+    cleaned = _HANDLE_RE.sub("[핸들]", cleaned)
+    return cleaned.strip()
+
+
+def compute_utterance_hash(text: str) -> str:
+    """Compute deterministic SHA-256 fingerprint of PII-scrubbed utterance text."""
+    normalized = re.sub(r"\s+", " ", scrub_pii(text)).strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
 
 
 class PragmaticCorpusRecord(BaseModel):
     """Single dialogue turn record stored in the pragmatics training corpus."""
 
     speaker: str
-    text: str
+    text: str = ""
     next_reaction: str = ""
     label: IllocutionaryForce
     source: str = "online"
+    utterance_hash: str = ""
+    morph_features: list[str] = Field(default_factory=list)
 
 
 class PragmaticModelWeights(BaseModel):
@@ -83,7 +141,10 @@ class PragmaticCorpusStats(BaseModel):
     """Summary statistics and top discovered morphological features in the pragmatics engine."""
 
     corpus_path: str
+    private_corpus_path: str
     weights_path: str
+    public_corpus_records: int
+    private_corpus_records: int
     total_corpus_records: int
     class_distribution: dict[str, int]
     top_features_by_class: dict[str, list[tuple[str, float]]]
@@ -94,19 +155,25 @@ class DialogueIngestionResult(BaseModel):
 
     appended_records: int
     bootstrapped_from_reactions: int
+    privacy_mode: PrivacyMode
+    target_store: str
     total_corpus_records: int
     top_newly_weighted_features: dict[str, list[tuple[str, float]]]
 
 
-def extract_morph_features(text: str) -> list[str]:
+def extract_morph_features(text: str, allow_proper_nouns: bool = True) -> list[str]:
     """Extract morphological content/pragmatic stem unigrams, bigrams, and trigrams."""
+    cleaned = scrub_pii(text)
+    if not cleaned:
+        return []
     kiwi = get_kiwi()
-    tokens = kiwi.tokenize(text)
+    tokens = kiwi.tokenize(cleaned)
+    allowed_tags = PUBLIC_FEATURE_POS_TAGS if allow_proper_nouns else PRIVATE_FEATURE_POS_TAGS
     filtered: list[str] = []
 
     for tok in tokens:
         base_tag = tok.tag.split("-")[0]
-        if base_tag not in FEATURE_POS_TAGS:
+        if base_tag not in allowed_tags:
             continue
         norm_form = normalize_kiwi_jamo(tok.form)
         if norm_form in STOP_MORPHEMES:
@@ -119,7 +186,6 @@ def extract_morph_features(text: str) -> list[str]:
     for i in range(len(filtered) - 2):
         features.append(f"{filtered[i]}+{filtered[i + 1]}+{filtered[i + 2]}")
 
-    # Deduplicate per utterance while preserving order
     return list(dict.fromkeys(features))
 
 
@@ -133,39 +199,67 @@ def infer_weak_label_from_reaction(next_reaction: str) -> IllocutionaryForce | N
         return "indirect_request_or_urge"
     if any(sig in next_reaction for sig in DISSENT_REACTION_SIGNALS):
         return "hedged_dissent_or_reservation"
+    if any(sig in next_reaction for sig in PRESSURE_REACTION_SIGNALS):
+        return "direct_pressure_or_blame"
     return None
 
 
 class PragmaticCorpusEngine:
-    """Manages pragmatics JSONL corpus accumulation and incremental N-gram log-odds training."""
+    """Manages public/private pragmatics JSONL corpora and incremental N-gram training."""
 
     def __init__(
         self,
         corpus_path: Path | str | None = None,
         weights_path: Path | str | None = None,
+        private_corpus_path: Path | str | None = None,
     ) -> None:
-        c_raw = corpus_path or os.environ.get("LLM_LINGUISTICS_CORPUS_PATH", DEFAULT_CORPUS_PATH)
-        w_raw = weights_path or os.environ.get("LLM_LINGUISTICS_WEIGHTS_PATH", DEFAULT_WEIGHTS_PATH)
+        c_raw = corpus_path or os.environ.get(
+            "LLM_LINGUISTICS_PRAGMATICS_CORPUS_PATH",
+            os.environ.get("LLM_LINGUISTICS_CORPUS_PATH", DEFAULT_CORPUS_PATH),
+        )
+        p_raw = private_corpus_path or os.environ.get(
+            "LLM_LINGUISTICS_PRIVATE_CORPUS_PATH",
+            DEFAULT_PRIVATE_CORPUS_PATH,
+        )
+        w_raw = weights_path or os.environ.get(
+            "LLM_LINGUISTICS_PRAGMATICS_WEIGHTS_PATH",
+            os.environ.get("LLM_LINGUISTICS_WEIGHTS_PATH", DEFAULT_WEIGHTS_PATH),
+        )
         self.corpus_path = Path(c_raw).expanduser().resolve()
+        self.private_corpus_path = Path(p_raw).expanduser().resolve()
         self.weights_path = Path(w_raw).expanduser().resolve()
         self.weights = self._load_or_train_weights()
 
-    def load_records(self) -> list[PragmaticCorpusRecord]:
-        if not self.corpus_path.exists():
+    def _read_jsonl(self, path: Path) -> list[PragmaticCorpusRecord]:
+        if not path.exists():
             return []
         records: list[PragmaticCorpusRecord] = []
-        for line in self.corpus_path.read_text(encoding="utf-8").splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if stripped:
                 records.append(PragmaticCorpusRecord.model_validate_json(stripped))
         return records
 
+    def load_public_records(self) -> list[PragmaticCorpusRecord]:
+        return self._read_jsonl(self.corpus_path)
+
+    def load_private_records(self) -> list[PragmaticCorpusRecord]:
+        return self._read_jsonl(self.private_corpus_path)
+
+    def load_records(self) -> list[PragmaticCorpusRecord]:
+        """Load combined public and private corpus records."""
+        return self.load_public_records() + self.load_private_records()
+
     def _load_or_train_weights(self) -> PragmaticModelWeights:
         if self.weights_path.exists():
-            return PragmaticModelWeights.model_validate_json(
+            loaded = PragmaticModelWeights.model_validate_json(
                 self.weights_path.read_text(encoding="utf-8")
             )
-        if self.corpus_path.exists():
+            current_records = self.load_records()
+            if current_records and loaded.total_samples != len(current_records):
+                return self.retrain_from_corpus()
+            return loaded
+        if self.corpus_path.exists() or self.private_corpus_path.exists():
             return self.retrain_from_corpus()
         return PragmaticModelWeights()
 
@@ -181,7 +275,11 @@ class PragmaticCorpusEngine:
 
         for rec in records:
             class_counts[rec.label] += 1
-            feats = extract_morph_features(rec.text)
+            feats = (
+                rec.morph_features
+                if rec.morph_features
+                else extract_morph_features(rec.text, allow_proper_nouns=True)
+            )
             for f in feats:
                 feature_class_counts[rec.label][f] += 1
                 feature_total_counts[f] += 1
@@ -206,7 +304,6 @@ class PragmaticCorpusEngine:
                     continue
                 cnt_in_not_c = tot_cnt - cnt_in_c
 
-                # Smoothed log-odds ratio between class c and ~c
                 p_c = (cnt_in_c + alpha) / (n_c + 2.0 * alpha)
                 p_not_c = (cnt_in_not_c + alpha) / (n_not_c + 2.0 * alpha)
                 log_odds = math.log(p_c / (1.0 - p_c)) - math.log(p_not_c / (1.0 - p_not_c))
@@ -233,25 +330,95 @@ class PragmaticCorpusEngine:
         )
         os.replace(tmp_path, self.weights_path)
 
+    def _existing_fingerprints(self) -> set[str]:
+        seen: set[str] = set()
+        for r in self.load_records():
+            if r.utterance_hash:
+                seen.add(r.utterance_hash)
+            if r.text:
+                seen.add(compute_utterance_hash(r.text))
+                seen.add(r.text)
+        return seen
+
     def append_records(
         self,
         new_records: list[PragmaticCorpusRecord],
+        privacy_mode: PrivacyMode = "public_full",
         retrain: bool = True,
-    ) -> None:
+    ) -> int:
         if not new_records:
-            return
-        self.corpus_path.parent.mkdir(parents=True, exist_ok=True)
-        existing_texts = {r.text for r in self.load_records()}
-        to_write = [r for r in new_records if r.text not in existing_texts]
-        if not to_write:
-            return
+            return 0
 
-        with self.corpus_path.open("a", encoding="utf-8") as f:
+        existing_fps = self._existing_fingerprints()
+        to_write: list[PragmaticCorpusRecord] = []
+
+        for rec in new_records:
+            u_hash = rec.utterance_hash or compute_utterance_hash(rec.text)
+            if u_hash in existing_fps or (rec.text and rec.text in existing_fps):
+                continue
+            existing_fps.add(u_hash)
+
+            if privacy_mode == "features_only":
+                feats = rec.morph_features or extract_morph_features(
+                    rec.text, allow_proper_nouns=False
+                )
+                if not feats:
+                    continue
+                sanitized = PragmaticCorpusRecord(
+                    speaker="anon",
+                    text="",
+                    next_reaction="",
+                    label=rec.label,
+                    source=rec.source,
+                    utterance_hash=u_hash,
+                    morph_features=feats,
+                )
+            elif privacy_mode == "private_scrubbed":
+                feats = rec.morph_features or extract_morph_features(
+                    rec.text, allow_proper_nouns=False
+                )
+                sanitized = PragmaticCorpusRecord(
+                    speaker="anon",
+                    text=scrub_pii(rec.text),
+                    next_reaction=scrub_pii(rec.next_reaction),
+                    label=rec.label,
+                    source=rec.source,
+                    utterance_hash=u_hash,
+                    morph_features=feats,
+                )
+            else:
+                sanitized = PragmaticCorpusRecord(
+                    speaker=rec.speaker,
+                    text=scrub_pii(rec.text),
+                    next_reaction=scrub_pii(rec.next_reaction),
+                    label=rec.label,
+                    source=rec.source,
+                    utterance_hash=u_hash,
+                    morph_features=rec.morph_features,
+                )
+            to_write.append(sanitized)
+
+        if not to_write:
+            return 0
+
+        target_path = (
+            self.corpus_path if privacy_mode == "public_full" else self.private_corpus_path
+        )
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with target_path.open("a", encoding="utf-8") as f:
             for rec in to_write:
-                f.write(json.dumps(rec.model_dump(), ensure_ascii=False) + "\n")
+                dumped = json.dumps(rec.model_dump(exclude_defaults=True), ensure_ascii=False)
+                f.write(dumped + "\n")
+
+        if privacy_mode != "public_full":
+            try:
+                os.chmod(target_path, 0o600)
+            except OSError:
+                pass
 
         if retrain:
             self.retrain_from_corpus()
+        return len(to_write)
 
     def predict_from_ngram_weights(
         self,
@@ -262,7 +429,7 @@ class PragmaticCorpusEngine:
         if not self.weights.feature_log_odds:
             return None, 0.0, []
 
-        feats = extract_morph_features(text)
+        feats = extract_morph_features(text, allow_proper_nouns=True)
         best_cls: IllocutionaryForce | None = None
         best_score = 0.0
         best_matched: list[str] = []
@@ -281,7 +448,6 @@ class PragmaticCorpusEngine:
         if best_cls is None or best_score < threshold:
             return None, 0.0, []
 
-        # Convert cumulative log-odds score to sigmoid probability in [0.55, 0.99]
         prob = round(1.0 / (1.0 + math.exp(-(best_score - threshold + 0.5))), 4)
         return best_cls, prob, best_matched
 
@@ -289,28 +455,30 @@ class PragmaticCorpusEngine:
         self,
         turns: list[DialogueTurnInput],
         explicit_labels: dict[int, IllocutionaryForce] | None = None,
+        privacy_mode: PrivacyMode = "public_full",
+        source_tag: str = "online",
     ) -> DialogueIngestionResult:
         """Ingest a multi-turn dialogue, bootstrap labels from reactions, and retrain weights."""
         if not turns:
             raise ValueError("turns list must not be empty.")
 
         explicit = explicit_labels or {}
-        new_records: list[PragmaticCorpusRecord] = []
+        candidate_records: list[PragmaticCorpusRecord] = []
         bootstrapped_cnt = 0
 
         for idx, turn in enumerate(turns):
             next_text = turns[idx + 1].text if idx + 1 < len(turns) else ""
             label = explicit.get(idx)
-            source = "explicit"
+            source = source_tag
             if label is None:
                 weak = infer_weak_label_from_reaction(next_text)
                 if weak is not None:
                     label = weak
-                    source = "reaction_bootstrap"
+                    source = f"{source_tag}:reaction_bootstrap"
                     bootstrapped_cnt += 1
 
             if label is not None:
-                new_records.append(
+                candidate_records.append(
                     PragmaticCorpusRecord(
                         speaker=turn.speaker,
                         text=turn.text,
@@ -320,11 +488,22 @@ class PragmaticCorpusEngine:
                     )
                 )
 
-        self.append_records(new_records, retrain=True)
+        written_cnt = self.append_records(
+            candidate_records,
+            privacy_mode=privacy_mode,
+            retrain=True,
+        )
         stats = self.get_stats(top_k=5)
+        target_store = (
+            str(self.corpus_path)
+            if privacy_mode == "public_full"
+            else str(self.private_corpus_path)
+        )
         return DialogueIngestionResult(
-            appended_records=len(new_records),
+            appended_records=written_cnt,
             bootstrapped_from_reactions=bootstrapped_cnt,
+            privacy_mode=privacy_mode,
+            target_store=target_store,
             total_corpus_records=stats.total_corpus_records,
             top_newly_weighted_features=stats.top_features_by_class,
         )
@@ -335,9 +514,14 @@ class PragmaticCorpusEngine:
             sorted_feats = sorted(f_map.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
             top_by_cls[cls] = sorted_feats
 
+        pub_cnt = len(self.load_public_records())
+        priv_cnt = len(self.load_private_records())
         return PragmaticCorpusStats(
             corpus_path=str(self.corpus_path),
+            private_corpus_path=str(self.private_corpus_path),
             weights_path=str(self.weights_path),
+            public_corpus_records=pub_cnt,
+            private_corpus_records=priv_cnt,
             total_corpus_records=self.weights.total_samples,
             class_distribution=self.weights.class_counts,
             top_features_by_class=top_by_cls,
@@ -358,11 +542,13 @@ def get_corpus_engine() -> PragmaticCorpusEngine:
 def reset_corpus_engine_for_testing(
     corpus_path: Path | str | None = None,
     weights_path: Path | str | None = None,
+    private_corpus_path: Path | str | None = None,
 ) -> PragmaticCorpusEngine:
     """Reinitialize singleton PragmaticCorpusEngine for isolated tests."""
     global _CORPUS_ENGINE_SINGLETON
     _CORPUS_ENGINE_SINGLETON = PragmaticCorpusEngine(
         corpus_path=corpus_path,
         weights_path=weights_path,
+        private_corpus_path=private_corpus_path,
     )
     return _CORPUS_ENGINE_SINGLETON

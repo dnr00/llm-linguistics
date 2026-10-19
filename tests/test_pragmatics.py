@@ -126,3 +126,217 @@ def test_self_evolving_pragmatics_reaction_bootstrapping_and_ngram_inference(
     # Reset back to default repo paths after test
     reset_corpus_engine_for_testing()
 
+
+def test_privacy_separation_features_only_and_pii_scrubbing(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    import shutil
+    from pathlib import Path
+
+    from llm_linguistics.pragmatics import reset_corpus_engine_for_testing, scrub_pii
+    from llm_linguistics.pragmatics.corpus_learner import DEFAULT_CORPUS_PATH
+
+    raw_pii = (
+        "<@U12345|홍길동>님, @sec_handle 문의하신 010-1234-5678 연락처와 "
+        "user@company.co.kr 및 https://internal.corp/doc 토큰 xoxb-1234-abcd 확인 바랍니다."
+    )
+    scrubbed = scrub_pii(raw_pii)
+    assert "홍길동" not in scrubbed
+    assert "010-1234-5678" not in scrubbed
+    assert "user@company.co.kr" not in scrubbed
+    assert "https://internal.corp" not in scrubbed
+    assert "xoxb-1234-abcd" not in scrubbed
+    assert "@sec_handle" not in scrubbed
+
+    temp_dir = Path(str(tmp_path))
+    pub_corpus = temp_dir / "public.jsonl"
+    priv_corpus = temp_dir / "private.jsonl"
+    weights_file = temp_dir / "weights.json"
+    shutil.copyfile(DEFAULT_CORPUS_PATH, pub_corpus)
+
+    engine = reset_corpus_engine_for_testing(
+        corpus_path=pub_corpus,
+        private_corpus_path=priv_corpus,
+        weights_path=weights_file,
+    )
+
+    private_dialogue = [
+        DialogueTurnInput(
+            speaker="U99999",
+            text="<@U12345|김철수>님 해당 안건은 영구 폐기 절차로 돌리겠습니다.",
+        ),
+        DialogueTurnInput(
+            speaker="U12345",
+            text="네, 아쉽지만 어쩔 수 없네요.",
+        ),
+    ]
+    res = engine.ingest_dialogue_turns(private_dialogue, privacy_mode="features_only")
+    assert res.appended_records == 1
+    assert res.privacy_mode == "features_only"
+
+    # Verify raw text is NEVER written to private_corpus.jsonl and proper nouns are stripped
+    priv_raw_content = priv_corpus.read_text(encoding="utf-8")
+    assert "영구 폐기 절차로 돌리겠습니다" not in priv_raw_content
+    assert "김철수" not in priv_raw_content
+    priv_records = engine.load_private_records()
+    assert len(priv_records) == 1
+    assert priv_records[0].text == ""
+    assert priv_records[0].speaker == "anon"
+    assert any("폐기/NNG" in f for f in priv_records[0].morph_features)
+
+    # Deduplication works via utterance_hash even when text="" on disk
+    dup_res = engine.ingest_dialogue_turns(private_dialogue, privacy_mode="features_only")
+    assert dup_res.appended_records == 0
+
+    # N-gram inference works on the newly learned private features
+    probe = [DialogueTurnInput(speaker="A", text="이 건은 영구 폐기 절차로 돌리겠습니다.")]
+    analyzed = analyze_discourse(probe)
+    assert analyzed.utterances[0].illocutionary_force == "indirect_refusal_or_deferral"
+
+    reset_corpus_engine_for_testing()
+
+
+def test_multi_channel_collectors_slack_telegram_and_export(
+    tmp_path: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+    import shutil
+    from pathlib import Path
+    from typing import Any
+
+    import llm_linguistics.pragmatics.collectors as col_mod
+    from llm_linguistics.pragmatics import (
+        collect_slack_channel,
+        collect_telegram_updates,
+        ingest_telegram_export,
+        reset_checkpoint_store_for_testing,
+        reset_corpus_engine_for_testing,
+    )
+    from llm_linguistics.pragmatics.corpus_learner import DEFAULT_CORPUS_PATH
+
+    temp_dir = Path(str(tmp_path))
+    pub_corpus = temp_dir / "pub.jsonl"
+    priv_corpus = temp_dir / "priv.jsonl"
+    weights_file = temp_dir / "weights.json"
+    checkpoints_file = temp_dir / "checkpoints.json"
+    shutil.copyfile(DEFAULT_CORPUS_PATH, pub_corpus)
+
+    reset_corpus_engine_for_testing(
+        corpus_path=pub_corpus,
+        private_corpus_path=priv_corpus,
+        weights_path=weights_file,
+    )
+    cp_store = reset_checkpoint_store_for_testing(path=checkpoints_file)
+
+    # 1. Missing token raises explicit RuntimeError
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    with pytest.raises(RuntimeError, match="Missing SLACK_BOT_TOKEN"):
+        collect_slack_channel("C12345")
+
+    # 2. Mock Slack API history & thread replies
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test-token")
+
+    def fake_slack_get(
+        endpoint: str,
+        params: dict[str, Any],
+        token: str,
+        timeout_sec: float,
+    ) -> dict[str, Any]:
+        if endpoint == "conversations.history":
+            return {
+                "ok": True,
+                "messages": [
+                    {
+                        "ts": "1700000010.000100",
+                        "user": "U1",
+                        "text": "이번 주 내로 배포 일정 조율 가능하실까요?",
+                        "reply_count": 1,
+                        "thread_ts": "1700000010.000100",
+                    }
+                ],
+            }
+        return {
+            "ok": True,
+            "messages": [
+                {
+                    "ts": "1700000010.000100",
+                    "user": "U1",
+                    "text": "이번 주 내로 배포 일정 조율 가능하실까요?",
+                },
+                {
+                    "ts": "1700000020.000200",
+                    "user": "U2",
+                    "text": "제가 바로 확인해서 곧 회신드리겠습니다.",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(col_mod, "_slack_api_get", fake_slack_get)
+    slack_res = collect_slack_channel("C12345", privacy_mode="features_only")
+    assert slack_res.checkpoint_cursor == "1700000010.000100"
+    assert cp_store.state.slack_cursors["C12345"] == "1700000010.000100"
+    assert slack_res.ingestion_result is not None
+    assert slack_res.ingestion_result.bootstrapped_from_reactions >= 1
+
+    # 3. Telegram Desktop JSON export with reply_to_message_id linking
+    tg_export = [
+        {
+            "id": 101,
+            "type": "message",
+            "from": "팀장",
+            "text": "해당 기능은 장기 백로그로 이관해 두겠습니다.",
+        },
+        {
+            "id": 102,
+            "type": "message",
+            "from": "기획자",
+            "reply_to_message_id": 101,
+            "text": ["네, ", {"type": "bold", "text": "아쉽네요."}, " 다음 기회에 진행하죠."],
+        },
+    ]
+    tg_res = ingest_telegram_export(tg_export, privacy_mode="features_only")
+    assert tg_res.ingestion_result is not None
+    assert tg_res.ingestion_result.bootstrapped_from_reactions == 1
+    assert tg_res.ingestion_result.appended_records == 1
+
+    # 4. Telegram Bot getUpdates with checkpoint advance
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:ABC-DEF")
+
+    class _FakeResp:
+        def __enter__(self) -> _FakeResp:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def read(self, _n: int = -1) -> bytes:
+            return json.dumps({
+                "ok": True,
+                "result": [
+                    {
+                        "update_id": 500,
+                        "message": {
+                            "chat": {"id": 777},
+                            "from": {"id": 11},
+                            "text": "지금 바로 확인해서 오늘 중으로 바로 공유하겠습니다.",
+                            "reply_to_message": {
+                                "from": {"id": 22},
+                                "text": "로그 분석 자료 언제쯤 받아볼 수 있을까요?",
+                            },
+                        },
+                    }
+                ],
+            }).encode("utf-8")
+
+    monkeypatch.setattr(col_mod.urllib.request, "urlopen", lambda *a, **kw: _FakeResp())
+    tg_upd_res = collect_telegram_updates(privacy_mode="features_only")
+    assert tg_upd_res.checkpoint_cursor == "501"
+    assert cp_store.state.telegram_offset == 501
+    assert tg_upd_res.ingestion_result is not None
+    assert tg_upd_res.ingestion_result.bootstrapped_from_reactions >= 1
+
+    reset_corpus_engine_for_testing()
+    reset_checkpoint_store_for_testing()
+
+
