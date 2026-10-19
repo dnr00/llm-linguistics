@@ -69,7 +69,7 @@ args = ["--directory", "/path/to/llm-linguistics", "run", "llm-linguistics-mcp"]
 
 ---
 
-## 제공 MCP 도구 (18종)
+## 제공 MCP 도구 (20종)
 
 ### 1. 형태론 (`morph_*`)
 * `morph_verify_constraints`: 한글 음절 수, 공백 제외 글자 수, 받침 제약(`none` | `all` | `only_sonorant`), 초성 시퀀스(`expected_choseong_sequence`), 어절별 모음조화 준수 여부를 검사하고 위반한 정확한 음절 인덱스를 반환합니다.
@@ -77,15 +77,17 @@ args = ["--directory", "/path/to/llm-linguistics", "run", "llm-linguistics-mcp"]
 * `morph_normalize_for_rag`: `ㅂ/ㄷ` 등 불규칙 활용 용언(`추워서` → `춥다`, `걸었다` → `걷다`)을 기본형으로 복원하고 복합어를 하위 어근으로 쪼개어 Hybrid RAG 인덱싱용 쿼리를 생성합니다.
 
 ### 2. 화용론 (`pragmatics_*`)
-* `pragmatics_analyze_discourse`: 대화 턴(`speaker`, `text`) 목록을 분석해 발화별 6단계 화계(`formal_high` 하십시오체 ~ `informal_low` 해체), 주체 높임(`-시-`), 화계 강등 지점, 간접화행(`indirect_refusal_or_deferral`, `indirect_request_or_urge`, `hedged_dissent_or_reservation`, `direct_pressure_or_blame`) 및 신뢰도 점수를 반환합니다. `auto_harvest_reactions=True`로 호출하면 후속 턴의 반응에서 직전 턴의 화용론 라벨을 자동 역추적해 누적합니다.
+* `pragmatics_analyze_discourse`: 대화 턴(`speaker`, `text`) 목록을 분석해 발화별 6단계 화계(`formal_high` 하십시오체 ~ `informal_low` 해체), 주체 높임(`-시-`), 화계 강등 지점, 간접화행(`indirect_refusal_or_deferral`, `indirect_request_or_urge`, `hedged_dissent_or_reservation`, `direct_pressure_or_blame`) 및 신뢰도 점수를 반환합니다. 기본값 `auto_harvest_reactions=True`(`privacy_mode="features_only"`)로 작동해 분석할 때마다 비식별 형태소 피처를 자동 누적합니다.
 * `pragmatics_ingest_dialogues`: 대화 로그를 입력받아 인접쌍 반응 부트스트래핑(Reaction Bootstrapping)으로 화용론 라벨을 부착하고(`privacy_mode="features_only"` 기본값), 디리클레 스무딩 형태소 N-gram 로그오즈 가중치(`data/pragmatics_weights.json`)를 즉시 재학습합니다.
 * `pragmatics_get_corpus_stats`: 공개·비공개 코퍼스 레코드 수와 발화 의도별 상위 형태소 N-gram 가중치를 조회합니다.
 
-### 3. 다중 채널 대화 수집 (`collect_*`, 프라이버시 분리 기본 적용)
+### 3. 다중 채널 대화 수집 및 자율 에이전트 증류 (`collect_*`, `autopilot_*`)
 * `collect_slack_dialogues`: 환경변수 `SLACK_BOT_TOKEN`을 사용해 지정 채널(`conversations.history`)과 스레드 답글(`conversations.replies`)을 마지막 체크포인트(`ts`) 이후부터 증분 수집합니다. 기본값 `privacy_mode="features_only"`로 동작해 원문과 고유명사(`NNP`)는 폐기하고 비식별 형태소 N-gram 피처만 학습합니다.
 * `collect_telegram_dialogues`: 환경변수 `TELEGRAM_BOT_TOKEN`으로 `getUpdates`를 증분 조회해 답장(`reply_to_message`) 체인과 연속 대화를 연결·학습합니다.
 * `collect_telegram_export_json`: 텔레그램 데스크톱이나 Telethon에서 내보낸 JSON 메시지 배열(`reply_to_message_id` 포함)을 일괄 입력받아 답장 인접쌍을 복원하고 비식별 형태소 피처로 학습합니다.
 * `collect_web_dialogues_and_oov`: 공개 웹페이지·RSS 피드에서 한국어 문장 시퀀스를 추출해 화용론 반응 역추적 학습과 미등록 복합명사(OOV) 사전 발굴을 동시에 수행합니다(콘텐츠 해시 체크포인트로 중복 수집 방지).
+* `autopilot_run_cycle`: 새로운 미분류 한국어 문장들을 수집한 뒤, 구독 격리(Subscription Billing Isolation)된 Claude Teacher 에이전트를 단 1회 호출해 간접화행 라벨·담화 표지·의미론 양상 패턴을 로컬 CPU 모델(`pragmatics_weights.json`, `learned_state.json`)로 증류(Distillation)합니다.
+* `autopilot_get_status`: 자율 증류 누적 통계와 서킷 브레이커 상태를 반환합니다.
 
 ### 4. 의미론 (`semantics_*`)
 * `semantics_extract_logical_markers`: 문장별 전칭/존재 양화사, 배타 표현, 이중 부정 여부, 의무·금지·허용 양상(`MUST` | `MUST_NOT` | `MAY`), 수치 비교 구문(`7일 이내` → `<= 7.0`)을 추출합니다.
@@ -146,20 +148,18 @@ report = auto_verify_korean_sentences([
 
 ---
 
-## 온라인 학습 상태, 코퍼스 저장소 및 일괄 수집 CLI
+## 무개입 자율 에이전트(`llm-linguistics-autopilot`) 및 저장소
 
-* **다중 채널 일괄 수집 CLI (`llm-linguistics-collect`)**: 에이전트를 띄우지 않고도 터미널이나 크론(GitHub Actions / `launchd`)에서 설정 파일(`data/collect_sources.json`) 또는 CLI 인자로 지정한 웹/RSS·슬랙·텔레그램 채널을 순회하며 코퍼스와 OOV 사전을 증분 학습합니다.
+* **무개입 백그라운드 에이전트 (`llm-linguistics-autopilot`)**: macOS `launchd` 백그라운드 데몬(`~/Library/LaunchAgents/com.uksang.llm-linguistics-autopilot.plist`)으로 등록해 두면 사용자가 아무 명령도 실행하지 않아도 주기적으로(기본 4시간 간격) 새 한국어 문장을 수집하고, 구독 전용(`ANTHROPIC_*` API 키 환경변수 완전 제거) `claude -p` Teacher를 최대 1회 호출해 로컬 모델을 자동 진화시킵니다(신규 문장이 없으면 LLM 호출 0회, 3회 연속 실패 시 서킷 브레이커 작동).
   ```bash
-  # 기본 설정 파일(data/collect_sources.json) 기반 일괄 수집
-  uv run llm-linguistics-collect
+  # macOS launchd 백그라운드 자동 실행 등록 (4시간마다 자동 실행)
+  uv run llm-linguistics-autopilot --install-launchd
 
-  # 특정 슬랙 채널·텔레그램 봇·웹 URL 지정 수집 (슬랙/텔레그램은 기본 features_only 비식별 모드)
-  SLACK_BOT_TOKEN=xoxb-... TELEGRAM_BOT_TOKEN=... uv run llm-linguistics-collect \
-    --slack-channel C01234567 \
-    --telegram \
-    --telegram-export ~/Downloads/ChatExport/result.json \
-    --url https://news.hada.io/rss/news
+  # 상태 조회 또는 즉시 1회 사이클 실행
+  uv run llm-linguistics-autopilot --status
+  uv run llm-linguistics-autopilot
   ```
+* **다중 채널 일괄 수집 CLI (`llm-linguistics-collect`)**: LLM 호출 없이 결정론적 반응 부트스트래핑과 OOV 마이닝만 즉시 실행할 때 사용합니다.
 * **화용론 진화 코퍼스 (`data/pragmatics_corpus.jsonl`, `~/.llm_linguistics/private_corpus.jsonl`, `data/pragmatics_weights.json`)**: 공개 시드 코퍼스는 `data/pragmatics_corpus.jsonl`에, 슬랙·텔레그램 비식별 형태소 피처는 `~/.llm_linguistics/private_corpus.jsonl`(`0600` 권한)에 분리 저장되며, 합산 학습된 N-gram 로그오즈 가중치만 `data/pragmatics_weights.json`에 기록됩니다.
 * **로컬 사용자 사전 및 피드백 (`~/.llm_linguistics/learned_state.json`)**: 발굴된 미등록어(OOV), 개별 표지 베이지안 가중치, 의미론 패턴이 원자적(Atomic rename)으로 저장되며 재시작 시 자동 로드됩니다(`LLM_LINGUISTICS_STATE_PATH`로 변경 가능).
 * **원격 HTTP MCP 서버 실행 (Railway 등)**: 환경변수 `MCP_TRANSPORT=http`와 `PORT`(기본값 `8000`)를 설정해 실행하면 `streamable-http` 모드로 기동되어 여러 기기에서 단일 코퍼스를 공유할 수 있습니다.

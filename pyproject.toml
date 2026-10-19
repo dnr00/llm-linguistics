@@ -24,6 +24,7 @@ dev = [
 [project.scripts]
 llm-linguistics-mcp = "llm_linguistics.mcp_server:main"
 llm-linguistics-collect = "llm_linguistics.cli_collect:main"
+llm-linguistics-autopilot = "llm_linguistics.autopilot:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/llm_linguistics"]

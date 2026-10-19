@@ -7,6 +7,12 @@ from typing import Literal
 
 from fastmcp import FastMCP
 
+from llm_linguistics.autopilot import (
+    AutopilotRunReport,
+    AutopilotState,
+    get_autopilot_store,
+    run_autopilot_cycle,
+)
 from llm_linguistics.learner import (
     CorpusMiningResult,
     LearnedPragmaticCue,
@@ -111,7 +117,7 @@ def morph_normalize_for_rag(text: str) -> RagNormalizedOutput:
 @mcp.tool()
 def pragmatics_analyze_discourse(
     utterances: list[DialogueTurnInput],
-    auto_harvest_reactions: bool = False,
+    auto_harvest_reactions: bool = True,
     privacy_mode: PrivacyMode = "features_only",
 ) -> DiscourseAnalysisResult:
     """Analyze 6-tier Korean speech levels, honorifics (-시-), shifts, and indirect speech acts."""
@@ -285,6 +291,18 @@ def learn_semantic_pattern(
         modality=modality,
         is_exclusive=is_exclusive,
     )
+
+
+@mcp.tool()
+def autopilot_run_cycle(max_utterances: int = 20) -> AutopilotRunReport:
+    """Run one bounded autonomous cycle: collect new Korean texts and distill via Claude Teacher."""
+    return run_autopilot_cycle(max_utterances=max_utterances)
+
+
+@mcp.tool()
+def autopilot_get_status() -> AutopilotState:
+    """Return cumulative autonomous LLM distillation stats and circuit-breaker state."""
+    return get_autopilot_store().state
 
 
 def main() -> None:
