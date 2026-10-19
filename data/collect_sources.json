@@ -1,0 +1,13 @@
+{
+  "web_urls": [
+    "https://news.hada.io/rss/news",
+    "https://tech.kakao.com/feed/",
+    "https://toss.tech/rss.xml"
+  ],
+  "slack_channels": [],
+  "enable_telegram_updates": false,
+  "telegram_export_files": [],
+  "slack_privacy_mode": "features_only",
+  "telegram_privacy_mode": "features_only",
+  "web_privacy_mode": "public_full"
+}

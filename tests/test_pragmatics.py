@@ -431,4 +431,86 @@ def test_multi_channel_collectors_slack_telegram_web_and_security(
     reset_learner_for_testing()
 
 
+def test_cli_collect_batch_runner_and_degraded_handling(
+    tmp_path: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+    import shutil
+    from pathlib import Path
+
+    from llm_linguistics.cli_collect import CollectSourcesConfig, main, run_batch_collection
+    from llm_linguistics.pragmatics import (
+        reset_checkpoint_store_for_testing,
+        reset_corpus_engine_for_testing,
+    )
+    from llm_linguistics.pragmatics.corpus_learner import DEFAULT_CORPUS_PATH
+
+    temp_dir = Path(str(tmp_path))
+    pub_corpus = temp_dir / "pub.jsonl"
+    priv_corpus = temp_dir / "priv.jsonl"
+    weights_file = temp_dir / "weights.json"
+    checkpoints_file = temp_dir / "checkpoints.json"
+    shutil.copyfile(DEFAULT_CORPUS_PATH, pub_corpus)
+
+    reset_corpus_engine_for_testing(
+        corpus_path=pub_corpus,
+        private_corpus_path=priv_corpus,
+        weights_path=weights_file,
+    )
+    reset_checkpoint_store_for_testing(path=checkpoints_file)
+
+    export_file = temp_dir / "result.json"
+    export_file.write_text(
+        json.dumps(
+            {
+                "name": "Project Room",
+                "messages": [
+                    {
+                        "id": 1,
+                        "type": "message",
+                        "from": "PM",
+                        "text": "이번 주 내로 보안 감사 일정 확정 가능하실까요?",
+                    },
+                    {
+                        "id": 2,
+                        "type": "message",
+                        "from": "SecLead",
+                        "reply_to_message_id": 1,
+                        "text": "지금 바로 확인해서 곧 회신드리겠습니다.",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    # 1. Healthy run via CLI main
+    exit_code = main(["--telegram-export", str(export_file)])
+    assert exit_code == 0
+
+    # 2. Degraded run (1 valid export + 1 missing Slack token)
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    cfg = CollectSourcesConfig(
+        slack_channels=["C_MISSING_TOKEN"],
+        telegram_export_files=[str(export_file)],
+    )
+    summary = run_batch_collection(cfg)
+    assert summary.status == "degraded"
+    assert summary.succeeded_sources == 1
+    assert summary.failed_sources == 1
+    assert len(summary.errors) == 1
+
+    # --strict returns exit code 1 on degraded status
+    strict_code = main(
+        ["--telegram-export", str(export_file), "--slack-channel", "C_MISSING", "--strict"]
+    )
+    assert strict_code == 1
+
+    reset_corpus_engine_for_testing()
+    reset_checkpoint_store_for_testing()
+
+
+
 

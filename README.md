@@ -146,8 +146,20 @@ report = auto_verify_korean_sentences([
 
 ---
 
-## 온라인 학습 상태 및 코퍼스 저장소
+## 온라인 학습 상태, 코퍼스 저장소 및 일괄 수집 CLI
 
-* **화용론 진화 코퍼스 (`data/pragmatics_corpus.jsonl`, `data/pragmatics_weights.json`)**: 레포지토리에 함께 버전 관리되는 대화 코퍼스와 형태소 N-gram 가중치 파일입니다. `pragmatics_ingest_dialogues` 호출 또는 `pragmatics_analyze_discourse(..., auto_harvest_reactions=True)` 실행 시 자동으로 코퍼스가 누적되고 가중치가 재계산됩니다. 경로를 변경하려면 `LLM_LINGUISTICS_PRAGMATICS_CORPUS_PATH`와 `LLM_LINGUISTICS_PRAGMATICS_WEIGHTS_PATH` 환경변수를 지정합니다.
+* **다중 채널 일괄 수집 CLI (`llm-linguistics-collect`)**: 에이전트를 띄우지 않고도 터미널이나 크론(GitHub Actions / `launchd`)에서 설정 파일(`data/collect_sources.json`) 또는 CLI 인자로 지정한 웹/RSS·슬랙·텔레그램 채널을 순회하며 코퍼스와 OOV 사전을 증분 학습합니다.
+  ```bash
+  # 기본 설정 파일(data/collect_sources.json) 기반 일괄 수집
+  uv run llm-linguistics-collect
+
+  # 특정 슬랙 채널·텔레그램 봇·웹 URL 지정 수집 (슬랙/텔레그램은 기본 features_only 비식별 모드)
+  SLACK_BOT_TOKEN=xoxb-... TELEGRAM_BOT_TOKEN=... uv run llm-linguistics-collect \
+    --slack-channel C01234567 \
+    --telegram \
+    --telegram-export ~/Downloads/ChatExport/result.json \
+    --url https://news.hada.io/rss/news
+  ```
+* **화용론 진화 코퍼스 (`data/pragmatics_corpus.jsonl`, `~/.llm_linguistics/private_corpus.jsonl`, `data/pragmatics_weights.json`)**: 공개 시드 코퍼스는 `data/pragmatics_corpus.jsonl`에, 슬랙·텔레그램 비식별 형태소 피처는 `~/.llm_linguistics/private_corpus.jsonl`(`0600` 권한)에 분리 저장되며, 합산 학습된 N-gram 로그오즈 가중치만 `data/pragmatics_weights.json`에 기록됩니다.
 * **로컬 사용자 사전 및 피드백 (`~/.llm_linguistics/learned_state.json`)**: 발굴된 미등록어(OOV), 개별 표지 베이지안 가중치, 의미론 패턴이 원자적(Atomic rename)으로 저장되며 재시작 시 자동 로드됩니다(`LLM_LINGUISTICS_STATE_PATH`로 변경 가능).
 * **원격 HTTP MCP 서버 실행 (Railway 등)**: 환경변수 `MCP_TRANSPORT=http`와 `PORT`(기본값 `8000`)를 설정해 실행하면 `streamable-http` 모드로 기동되어 여러 기기에서 단일 코퍼스를 공유할 수 있습니다.

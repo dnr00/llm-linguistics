@@ -692,7 +692,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/b8/b8/38c99548461844e0b
 
 [[package]]
 name = "llm-linguistics"
-version = "0.2.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },

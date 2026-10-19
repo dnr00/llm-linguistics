@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-linguistics"
-version = "0.2.0"
+version = "0.4.0"
 description = "Deterministic Korean morphology, pragmatics, and formal semantics toolkit + MCP server for LLM agents"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,6 +23,7 @@ dev = [
 
 [project.scripts]
 llm-linguistics-mcp = "llm_linguistics.mcp_server:main"
+llm-linguistics-collect = "llm_linguistics.cli_collect:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/llm_linguistics"]
