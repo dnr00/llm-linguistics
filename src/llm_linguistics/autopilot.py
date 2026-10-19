@@ -758,7 +758,7 @@ def run_autopilot_cycle(
 
 
 def install_launchd_agent(
-    interval_sec: int = 14400,
+    interval_sec: int = 3600,
     plist_path: Path | None = None,
     load_now: bool = True,
 ) -> Path:
@@ -847,8 +847,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--interval-sec",
         type=int,
-        default=14400,
-        help="Background launchd run interval in seconds (default: 14400 = 4 hours).",
+        default=3600,
+        help="Background launchd run interval in seconds (default: 3600 = 1 hour).",
     )
     parser.add_argument(
         "--reset-circuit",
