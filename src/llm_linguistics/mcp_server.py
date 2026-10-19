@@ -30,12 +30,18 @@ from llm_linguistics.morph import (
 )
 from llm_linguistics.morph.schemas import BatchimRule
 from llm_linguistics.pragmatics import (
+    ChannelCollectionResult,
     DialogueIngestionResult,
     DialogueTurnInput,
     DiscourseAnalysisResult,
     PragmaticCorpusStats,
+    PrivacyMode,
     analyze_discourse,
+    collect_slack_channel,
+    collect_telegram_updates,
+    collect_web_dialogues,
     get_corpus_engine,
+    ingest_telegram_export,
 )
 from llm_linguistics.semantics import (
     AutoVerificationReport,
@@ -54,10 +60,11 @@ mcp = FastMCP(
         "(1) morph_* tools for exact Hangul syllable/Jamo constraint verification, "
         "allomorphic Josa attachment, and irregular predicate/compound normalization for RAG; "
         "(2) pragmatics_* tools for 6-tier Korean speech-level tracking, honorific shifts, "
-        "morphological N-gram log-odds classification, and reaction-bootstrapped corpus growth; "
-        "(3) semantics_* tools for scope/quantifier/negation extraction, auto-formalization, "
+        "morphological N-gram log-odds classification, and privacy-separated corpus growth; "
+        "(3) collect_* tools for incremental dialogue harvesting from Slack, Telegram, and Web; "
+        "(4) semantics_* tools for scope/quantifier/negation extraction, auto-formalization, "
         "and Z3 theorem prover verification of policy/contract rule consistency; "
-        "(4) learn_* tools for online URL/RSS corpus ingestion, OOV word mining, Bayesian "
+        "(5) learn_* tools for online URL/RSS corpus ingestion, OOV word mining, Bayesian "
         "pragmatic cue feedback updates, and semantic modality pattern registration."
     ),
 )
@@ -105,26 +112,87 @@ def morph_normalize_for_rag(text: str) -> RagNormalizedOutput:
 def pragmatics_analyze_discourse(
     utterances: list[DialogueTurnInput],
     auto_harvest_reactions: bool = False,
+    privacy_mode: PrivacyMode = "features_only",
 ) -> DiscourseAnalysisResult:
     """Analyze 6-tier Korean speech levels, honorifics (-시-), shifts, and indirect speech acts."""
     return analyze_discourse(
         utterances=utterances,
         auto_harvest_reactions=auto_harvest_reactions,
+        privacy_mode=privacy_mode,
     )
 
 
 @mcp.tool()
 def pragmatics_ingest_dialogues(
     utterances: list[DialogueTurnInput],
+    privacy_mode: PrivacyMode = "features_only",
 ) -> DialogueIngestionResult:
     """Accumulate dialogue turns via reaction bootstrapping and retrain N-gram weights."""
-    return get_corpus_engine().ingest_dialogue_turns(turns=utterances)
+    return get_corpus_engine().ingest_dialogue_turns(
+        turns=utterances,
+        privacy_mode=privacy_mode,
+    )
 
 
 @mcp.tool()
 def pragmatics_get_corpus_stats(top_k: int = 8) -> PragmaticCorpusStats:
     """Return pragmatics corpus counts and top morphological N-gram log-odds features."""
     return get_corpus_engine().get_stats(top_k=top_k)
+
+
+@mcp.tool()
+def collect_slack_dialogues(
+    channel_id: str,
+    limit: int = 100,
+    include_threads: bool = True,
+    max_threads: int = 15,
+    privacy_mode: PrivacyMode = "features_only",
+) -> ChannelCollectionResult:
+    """Pull incremental Slack channel & thread messages via SLACK_BOT_TOKEN with privacy."""
+    return collect_slack_channel(
+        channel_id=channel_id,
+        limit=limit,
+        include_threads=include_threads,
+        max_threads=max_threads,
+        privacy_mode=privacy_mode,
+    )
+
+
+@mcp.tool()
+def collect_telegram_dialogues(
+    limit: int = 100,
+    privacy_mode: PrivacyMode = "features_only",
+) -> ChannelCollectionResult:
+    """Pull incremental Telegram Bot updates via TELEGRAM_BOT_TOKEN with privacy."""
+    return collect_telegram_updates(limit=limit, privacy_mode=privacy_mode)
+
+
+@mcp.tool()
+def collect_telegram_export_json(
+    messages: list[dict[str, object]],
+    chat_label: str = "telegram_export",
+    privacy_mode: PrivacyMode = "features_only",
+) -> ChannelCollectionResult:
+    """Ingest a Telegram Desktop/Telethon JSON message list with reply-chain linking."""
+    return ingest_telegram_export(
+        messages=messages,
+        chat_label=chat_label,
+        privacy_mode=privacy_mode,
+    )
+
+
+@mcp.tool()
+def collect_web_dialogues_and_oov(
+    url: str,
+    privacy_mode: PrivacyMode = "public_full",
+    also_mine_oov: bool = True,
+) -> ChannelCollectionResult:
+    """Fetch public web/RSS Korean dialogues, bootstrap pragmatic reactions, and mine OOV."""
+    return collect_web_dialogues(
+        url=url,
+        privacy_mode=privacy_mode,
+        also_mine_oov=also_mine_oov,
+    )
 
 
 @mcp.tool()

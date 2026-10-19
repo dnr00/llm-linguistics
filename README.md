@@ -69,7 +69,7 @@ args = ["--directory", "/path/to/llm-linguistics", "run", "llm-linguistics-mcp"]
 
 ---
 
-## 제공 MCP 도구 (14종)
+## 제공 MCP 도구 (18종)
 
 ### 1. 형태론 (`morph_*`)
 * `morph_verify_constraints`: 한글 음절 수, 공백 제외 글자 수, 받침 제약(`none` | `all` | `only_sonorant`), 초성 시퀀스(`expected_choseong_sequence`), 어절별 모음조화 준수 여부를 검사하고 위반한 정확한 음절 인덱스를 반환합니다.
@@ -77,16 +77,22 @@ args = ["--directory", "/path/to/llm-linguistics", "run", "llm-linguistics-mcp"]
 * `morph_normalize_for_rag`: `ㅂ/ㄷ` 등 불규칙 활용 용언(`추워서` → `춥다`, `걸었다` → `걷다`)을 기본형으로 복원하고 복합어를 하위 어근으로 쪼개어 Hybrid RAG 인덱싱용 쿼리를 생성합니다.
 
 ### 2. 화용론 (`pragmatics_*`)
-* `pragmatics_analyze_discourse`: 대화 턴(`speaker`, `text`) 목록을 분석해 발화별 6단계 화계(`formal_high` 하십시오체 ~ `informal_low` 해체), 주체 높임(`-시-`), 화계 강등 지점, 간접화행(`indirect_refusal_or_deferral`, `indirect_request_or_urge`, `hedged_dissent_or_reservation`) 및 신뢰도 점수를 반환합니다. `auto_harvest_reactions=True`로 호출하면 후속 턴의 반응(수긍·실망·사과 등)에서 직전 턴의 화용론 라벨을 자동 역추적해 코퍼스에 누적합니다.
-* `pragmatics_ingest_dialogues`: 대화 로그를 입력받아 인접쌍 반응 부트스트래핑(Reaction Bootstrapping)으로 화용론 라벨을 부착해 `data/pragmatics_corpus.jsonl`에 추가하고, 디리클레 스무딩 형태소 N-gram 로그오즈 가중치(`data/pragmatics_weights.json`)를 즉시 재학습합니다.
-* `pragmatics_get_corpus_stats`: 누적된 화용론 코퍼스 레코드 수와 발화 의도별 상위 형태소 N-gram 가중치를 조회합니다.
+* `pragmatics_analyze_discourse`: 대화 턴(`speaker`, `text`) 목록을 분석해 발화별 6단계 화계(`formal_high` 하십시오체 ~ `informal_low` 해체), 주체 높임(`-시-`), 화계 강등 지점, 간접화행(`indirect_refusal_or_deferral`, `indirect_request_or_urge`, `hedged_dissent_or_reservation`, `direct_pressure_or_blame`) 및 신뢰도 점수를 반환합니다. `auto_harvest_reactions=True`로 호출하면 후속 턴의 반응에서 직전 턴의 화용론 라벨을 자동 역추적해 누적합니다.
+* `pragmatics_ingest_dialogues`: 대화 로그를 입력받아 인접쌍 반응 부트스트래핑(Reaction Bootstrapping)으로 화용론 라벨을 부착하고(`privacy_mode="features_only"` 기본값), 디리클레 스무딩 형태소 N-gram 로그오즈 가중치(`data/pragmatics_weights.json`)를 즉시 재학습합니다.
+* `pragmatics_get_corpus_stats`: 공개·비공개 코퍼스 레코드 수와 발화 의도별 상위 형태소 N-gram 가중치를 조회합니다.
 
-### 3. 의미론 (`semantics_*`)
+### 3. 다중 채널 대화 수집 (`collect_*`, 프라이버시 분리 기본 적용)
+* `collect_slack_dialogues`: 환경변수 `SLACK_BOT_TOKEN`을 사용해 지정 채널(`conversations.history`)과 스레드 답글(`conversations.replies`)을 마지막 체크포인트(`ts`) 이후부터 증분 수집합니다. 기본값 `privacy_mode="features_only"`로 동작해 원문과 고유명사(`NNP`)는 폐기하고 비식별 형태소 N-gram 피처만 학습합니다.
+* `collect_telegram_dialogues`: 환경변수 `TELEGRAM_BOT_TOKEN`으로 `getUpdates`를 증분 조회해 답장(`reply_to_message`) 체인과 연속 대화를 연결·학습합니다.
+* `collect_telegram_export_json`: 텔레그램 데스크톱이나 Telethon에서 내보낸 JSON 메시지 배열(`reply_to_message_id` 포함)을 일괄 입력받아 답장 인접쌍을 복원하고 비식별 형태소 피처로 학습합니다.
+* `collect_web_dialogues_and_oov`: 공개 웹페이지·RSS 피드에서 한국어 문장 시퀀스를 추출해 화용론 반응 역추적 학습과 미등록 복합명사(OOV) 사전 발굴을 동시에 수행합니다(콘텐츠 해시 체크포인트로 중복 수집 방지).
+
+### 4. 의미론 (`semantics_*`)
 * `semantics_extract_logical_markers`: 문장별 전칭/존재 양화사, 배타 표현, 이중 부정 여부, 의무·금지·허용 양상(`MUST` | `MUST_NOT` | `MAY`), 수치 비교 구문(`7일 이내` → `<= 7.0`)을 추출합니다.
 * `semantics_verify_rule_consistency`: 정형화된 규칙(`PolicyRule`) 목록을 `Z3 Solver`로 검증해 도달 불가능한 규칙(Dead rule)과 양상 충돌 쌍, 구체적인 반례 변수 할당(`witness_assignment`)을 반환합니다.
 * `semantics_auto_verify_sentences`: 별도의 수식 변환 없이 한국어 약관·규정 원문 문장 리스트만 입력받아 행위 명사, 조건절 한정 명사구, 수치 범위를 자동 파싱한 뒤 Z3로 모순을 검증합니다.
 
-### 4. 온라인 학습 (`learn_*`)
+### 5. 온라인 학습 (`learn_*`)
 * `learn_from_online_url`: 외부 웹페이지(HTML)나 뉴스·기술 블로그 RSS/Atom 피드 URL에서 한국어 문장을 수집해 도메인 미등록어(OOV)를 자동 발굴하고 런타임 `Kiwi` 사전에 즉시 반영합니다.
 * `learn_domain_corpus`: 텍스트 배열에서 품사 경계 점수(`pos_score`)와 형태소 분할 여부를 기준으로 신조어·복합명사를 추출해 사전에 등록합니다.
 * `learn_domain_word`: 단일 고유명사·전문용어를 지정 품사(`NNP` | `NNG` | `MAG` | `IC`)로 즉시 등록합니다.

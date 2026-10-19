@@ -61,8 +61,8 @@ def _validate_public_http_url(url: str) -> None:
             raise
 
 
-def html_or_xml_to_sentences(raw_content: str, min_hangul_syllables: int = 5) -> list[str]:
-    """Parse RSS/Atom XML or HTML string into clean Korean sentences."""
+def html_or_xml_to_blocks(raw_content: str, min_hangul_syllables: int = 5) -> list[str]:
+    """Parse RSS/Atom XML or HTML string into paragraph/element-level Korean text blocks."""
     text_blocks: list[str] = []
     stripped = raw_content.lstrip()
 
@@ -86,6 +86,18 @@ def html_or_xml_to_sentences(raw_content: str, min_hangul_syllables: int = 5) ->
         parser.feed(raw_content)
         text_blocks = parser.chunks
 
+    filtered_blocks: list[str] = []
+    for block in text_blocks:
+        b_text = block.strip()
+        hangul_cnt = sum(1 for ch in b_text if is_hangul_syllable(ch))
+        if hangul_cnt >= min_hangul_syllables:
+            filtered_blocks.append(b_text)
+    return filtered_blocks
+
+
+def html_or_xml_to_sentences(raw_content: str, min_hangul_syllables: int = 5) -> list[str]:
+    """Parse RSS/Atom XML or HTML string into clean Korean sentences."""
+    text_blocks = html_or_xml_to_blocks(raw_content, min_hangul_syllables=min_hangul_syllables)
     kiwi = get_kiwi()
     sentences: list[str] = []
     for block in text_blocks:

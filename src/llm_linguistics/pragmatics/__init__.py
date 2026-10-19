@@ -1,14 +1,28 @@
 """Korean pragmatic discourse analysis: speech levels, honorifics, and indirect speech acts."""
 
 from llm_linguistics.pragmatics.analyzer import analyze_discourse
+from llm_linguistics.pragmatics.collectors import (
+    ChannelCollectionResult,
+    CollectorCheckpoints,
+    CollectorCheckpointStore,
+    collect_slack_channel,
+    collect_telegram_updates,
+    collect_web_dialogues,
+    get_checkpoint_store,
+    ingest_telegram_export,
+    reset_checkpoint_store_for_testing,
+)
 from llm_linguistics.pragmatics.corpus_learner import (
     DialogueIngestionResult,
     PragmaticCorpusEngine,
     PragmaticCorpusRecord,
     PragmaticCorpusStats,
     PragmaticModelWeights,
+    PrivacyMode,
+    compute_utterance_hash,
     get_corpus_engine,
     reset_corpus_engine_for_testing,
+    scrub_pii,
 )
 from llm_linguistics.pragmatics.schemas import (
     DialogueTurnInput,
@@ -21,6 +35,9 @@ from llm_linguistics.pragmatics.schemas import (
 )
 
 __all__ = [
+    "ChannelCollectionResult",
+    "CollectorCheckpointStore",
+    "CollectorCheckpoints",
     "DialogueIngestionResult",
     "DialogueTurnInput",
     "DiscourseAnalysisResult",
@@ -30,10 +47,19 @@ __all__ = [
     "PragmaticCorpusRecord",
     "PragmaticCorpusStats",
     "PragmaticModelWeights",
+    "PrivacyMode",
     "SentenceType",
     "SpeechLevel",
     "UtterancePragmatics",
     "analyze_discourse",
+    "collect_slack_channel",
+    "collect_telegram_updates",
+    "collect_web_dialogues",
+    "compute_utterance_hash",
+    "get_checkpoint_store",
     "get_corpus_engine",
+    "ingest_telegram_export",
+    "reset_checkpoint_store_for_testing",
     "reset_corpus_engine_for_testing",
+    "scrub_pii",
 ]
