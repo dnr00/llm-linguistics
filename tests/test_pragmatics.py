@@ -512,5 +512,189 @@ def test_cli_collect_batch_runner_and_degraded_handling(
     reset_checkpoint_store_for_testing()
 
 
+def test_autopilot_billing_isolation_and_distillation_cycle(
+    tmp_path: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import plistlib
+    import shutil
+    from email.message import Message
+    from pathlib import Path
+
+    import llm_linguistics.autopilot as ap_mod
+    import llm_linguistics.pragmatics.collectors as col_mod
+    from llm_linguistics.autopilot import (
+        DistilledCueItem,
+        DistilledSemanticItem,
+        DistilledUtteranceItem,
+        TeacherDistillationPayload,
+        build_billing_isolated_env,
+        install_launchd_agent,
+        reset_autopilot_store_for_testing,
+        run_autopilot_cycle,
+    )
+    from llm_linguistics.cli_collect import CollectSourcesConfig
+    from llm_linguistics.learner import reset_learner_for_testing
+    from llm_linguistics.pragmatics import (
+        reset_checkpoint_store_for_testing,
+        reset_corpus_engine_for_testing,
+    )
+    from llm_linguistics.pragmatics.corpus_learner import DEFAULT_CORPUS_PATH
+
+    temp_dir = Path(str(tmp_path))
+
+    # 1. Billing isolation env scrubber & settings.json guard
+    clean_settings = temp_dir / "clean_settings.json"
+    clean_settings.write_text('{"env": {"CLAUDE_CODE_EFFORT_LEVEL": "high"}}', encoding="utf-8")
+    dirty_env = {
+        "PATH": "/usr/bin:/bin",
+        "ANTHROPIC_API_KEY": "sk-ant-forbidden",
+        "ANTHROPIC_AUTH_TOKEN": "bearer-forbidden",
+        "CLAUDE_CODE_USE_BEDROCK": "1",
+        "CLAUDECODE": "1",
+        "CLAUDE_CODE_OAUTH_TOKEN": "oauth-max-sub-token",
+    }
+    scrubbed = build_billing_isolated_env(dirty_env, claude_settings_path=clean_settings)
+    assert "ANTHROPIC_API_KEY" not in scrubbed
+    assert "ANTHROPIC_AUTH_TOKEN" not in scrubbed
+    assert "CLAUDE_CODE_USE_BEDROCK" not in scrubbed
+    assert "CLAUDECODE" not in scrubbed
+    assert scrubbed["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-max-sub-token"
+
+    bad_settings = temp_dir / "bad_settings.json"
+    bad_settings.write_text('{"env": {"ANTHROPIC_API_KEY": "sk-ant-123"}}', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="Billing guard tripped"):
+        build_billing_isolated_env(dirty_env, claude_settings_path=bad_settings)
+
+    # 2. Autopilot distillation cycle + zero-token idle skip + circuit breaker
+    pub_corpus = temp_dir / "pub.jsonl"
+    priv_corpus = temp_dir / "priv.jsonl"
+    weights_file = temp_dir / "weights.json"
+    checkpoints_file = temp_dir / "checkpoints.json"
+    ap_state_file = temp_dir / "autopilot_state.json"
+    learner_file = temp_dir / "learned.json"
+    shutil.copyfile(DEFAULT_CORPUS_PATH, pub_corpus)
+
+    reset_corpus_engine_for_testing(
+        corpus_path=pub_corpus,
+        private_corpus_path=priv_corpus,
+        weights_path=weights_file,
+    )
+    reset_checkpoint_store_for_testing(path=checkpoints_file)
+    reset_autopilot_store_for_testing(path=ap_state_file)
+    reset_learner_for_testing(state_path=learner_file)
+
+    class _FakeWebResp:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+            self.headers = Message()
+
+        def __enter__(self) -> _FakeWebResp:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def read(self, _n: int = -1) -> bytes:
+            return self._body
+
+    monkeypatch.setattr(
+        col_mod.socket,
+        "getaddrinfo",
+        lambda host, port, *a, **kw: [(2, 1, 6, "", ("93.184.216.34", 0))],
+    )
+    html_bytes = (
+        "<html><body>"
+        "<p>해당 모듈 통합 작업은 차기 로드맵으로 순연 처리하겠습니다.</p>"
+        "</body></html>"
+    ).encode()
+    monkeypatch.setattr(
+        ap_mod,
+        "_safe_http_urlopen",
+        lambda req, timeout_sec: _FakeWebResp(html_bytes),
+    )
+    monkeypatch.setattr(
+        ap_mod,
+        "invoke_claude_teacher",
+        lambda utterances, timeout_sec=60.0: TeacherDistillationPayload(
+            pragmatic_labels=[
+                DistilledUtteranceItem(
+                    index=0,
+                    label="indirect_refusal_or_deferral",
+                    confidence=0.92,
+                )
+            ],
+            pragmatic_cues=[
+                DistilledCueItem(
+                    phrase="순연 처리하겠",
+                    category="indirect_refusal_cue",
+                )
+            ],
+            semantic_patterns=[
+                DistilledSemanticItem(
+                    pattern="사전 심의를 필하여야",
+                    modality="MUST",
+                    is_exclusive=False,
+                )
+            ],
+        ),
+    )
+
+    cfg = CollectSourcesConfig(web_urls=["https://example.com/feed"])
+    rep1 = run_autopilot_cycle(config=cfg)
+    assert rep1.status == "distilled"
+    assert rep1.llm_calls_made == 1
+    assert rep1.distilled_utterances_added == 1
+    assert rep1.distilled_cues_added == 1
+    assert rep1.distilled_patterns_added == 1
+
+    # Second run on unchanged URL makes 0 LLM calls
+    rep2 = run_autopilot_cycle(config=cfg)
+    assert rep2.status == "idle_no_new_data"
+    assert rep2.llm_calls_made == 0
+
+    # 3 consecutive LLM failures open circuit breaker
+    unlabelled_html = (
+        "<html><body><p>이번 주말에 사내 네트워크 정기 점검이 진행됩니다.</p></body></html>"
+    ).encode()
+    monkeypatch.setattr(
+        ap_mod,
+        "_safe_http_urlopen",
+        lambda req, timeout_sec: _FakeWebResp(unlabelled_html),
+    )
+
+    def _fail_teacher(*a: object, **kw: object) -> TeacherDistillationPayload:
+        raise RuntimeError("Simulated LLM failure")
+
+    monkeypatch.setattr(ap_mod, "invoke_claude_teacher", _fail_teacher)
+    for i in range(3):
+        fail_cfg = CollectSourcesConfig(web_urls=[f"https://example.com/fail_{i}"])
+        f_rep = run_autopilot_cycle(config=fail_cfg)
+        assert f_rep.status == "failed"
+
+    open_rep = run_autopilot_cycle(
+        config=CollectSourcesConfig(web_urls=["https://example.com/blocked"])
+    )
+    assert open_rep.status == "circuit_open"
+    assert open_rep.llm_calls_made == 0
+
+    # 3. launchd plist generation
+    plist_file = temp_dir / "com.uksang.llm-linguistics-autopilot.plist"
+    written_plist = install_launchd_agent(
+        interval_sec=7200,
+        plist_path=plist_file,
+        load_now=False,
+    )
+    parsed_plist = plistlib.loads(written_plist.read_bytes())
+    assert parsed_plist["StartInterval"] == 7200
+    assert parsed_plist["RunAtLoad"] is True
+
+    reset_corpus_engine_for_testing()
+    reset_checkpoint_store_for_testing()
+    reset_autopilot_store_for_testing()
+    reset_learner_for_testing()
+
+
+
 
 
