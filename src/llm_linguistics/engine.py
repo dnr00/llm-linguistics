@@ -109,3 +109,19 @@ def compose_syllable(choseong: str, jungseong: str, jongseong: str | None = None
         ) from exc
     code = HANGUL_BASE + (cho_idx * 21 * 28) + (jung_idx * 28) + jong_idx
     return chr(code)
+
+
+def normalize_kiwi_jamo(form: str) -> str:
+    """Convert conjoining Choseong/Jongseong Jamo emitted by Kiwi to compatibility Jamo."""
+    out: list[str] = []
+    for ch in form:
+        code = ord(ch)
+        if 0x1100 <= code <= 0x1112:
+            out.append(CHOSEONG_LIST[code - 0x1100])
+        elif 0x11A8 <= code <= 0x11C2:
+            mapped = JONGSEONG_LIST[code - 0x11A7]
+            out.append(mapped if mapped is not None else ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
