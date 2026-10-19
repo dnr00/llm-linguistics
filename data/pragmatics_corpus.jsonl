@@ -1,0 +1,18 @@
+{"speaker": "Client", "text": "내부적으로 면밀히 검토해 보고 추후에 말씀드리겠습니다.", "next_reaction": "네, 아쉽네요. 다음 기회에 뵙겠습니다.", "label": "indirect_refusal_or_deferral", "source": "seed"}
+{"speaker": "PM", "text": "현재 리소스 사정상 이번 스프린트 반영은 어렵고 차기 과제로 미루겠습니다.", "next_reaction": "어쩔 수 없네요. 보류하시는 걸로 알겠습니다.", "label": "indirect_refusal_or_deferral", "source": "seed"}
+{"speaker": "Partner", "text": "좋은 제안이나 당사 내부 우선순위를 다시 맞춰봐야 할 것 같습니다.", "next_reaction": "네, 내부 논의 결과 기다리겠습니다.", "label": "indirect_refusal_or_deferral", "source": "seed"}
+{"speaker": "Lead", "text": "그 건은 일단 홀딩해 두고 다른 급한 이슈부터 쳐내시죠.", "next_reaction": "알겠습니다. 일단 보류하겠습니다.", "label": "indirect_refusal_or_deferral", "source": "seed"}
+{"speaker": "Buyer", "text": "예산 편성이 여의치 않아 이번 분기 도입은 확답드리기 어렵습니다.", "next_reaction": "아쉽네요. 다음 분기에 다시 연락드리겠습니다.", "label": "indirect_refusal_or_deferral", "source": "seed"}
+{"speaker": "HR", "text": "모시고 싶으나 이번 채용 포지션과는 결이 조금 다른 것 같아 다음에 인연이 닿길 바랍니다.", "next_reaction": "감사합니다. 다음 기회에 지원하겠습니다.", "label": "indirect_refusal_or_deferral", "source": "seed"}
+{"speaker": "Vendor", "text": "혹시 지난번에 요청드린 API 명세서 언제쯤 확인 가능하실까요?", "next_reaction": "죄송합니다, 오늘 중으로 바로 전달드리겠습니다.", "label": "indirect_request_or_urge", "source": "seed"}
+{"speaker": "Manager", "text": "일정상 오늘 오후까지는 초안 공유 부탁드립니다.", "next_reaction": "네, 최대한 빨리 공유드리겠습니다.", "label": "indirect_request_or_urge", "source": "seed"}
+{"speaker": "Ops", "text": "배포 블로커라 그런데 혹시 PR 리뷰 진척 상황이 어떻게 될까요?", "next_reaction": "아 죄송합니다, 지금 바로 확인해서 승인하겠습니다.", "label": "indirect_request_or_urge", "source": "seed"}
+{"speaker": "Sales", "text": "계약서 날인본 회신 기다리고 있는데 내부 결재 일정 공유 가능하실까요?", "next_reaction": "죄송합니다, 곧 회신드리겠습니다.", "label": "indirect_request_or_urge", "source": "seed"}
+{"speaker": "Dev", "text": "그 아키텍처로 가면 추후 유지보수 비용이 다소 커지지 않을까 조심스럽네요.", "next_reaction": "우려하시는 부분 이해했습니다.", "label": "hedged_dissent_or_reservation", "source": "seed"}
+{"speaker": "Reviewer", "text": "글쎄요, 지금 상태에서 바로 프로덕션에 올리는 건 아무래도 리스크가 좀 있는 것 같습니다.", "next_reaction": "그럼 스테이징에서 하루 더 검증해 볼까요?", "label": "hedged_dissent_or_reservation", "source": "seed"}
+{"speaker": "Designer", "text": "죄송합니다만 이 레이아웃은 사용자 동선이 다소 복잡해질 듯하여 걱정이 됩니다.", "next_reaction": "의견 주셔서 감사합니다. 수정안을 같이 보시죠.", "label": "hedged_dissent_or_reservation", "source": "seed"}
+{"speaker": "Director", "text": "도대체 배포를 몇 번을 해야 하는 겁니까? 왜 아직도 안 고쳐졌어요?", "next_reaction": "죄송합니다. 원인 파악해서 즉시 수정하겠습니다.", "label": "direct_pressure_or_blame", "source": "seed"}
+{"speaker": "Client", "text": "당장 원상복구하시고 이번 장애 건은 어떻게 책임지실 건지 말씀하세요.", "next_reaction": "즉시 롤백 조치하겠습니다.", "label": "direct_pressure_or_blame", "source": "seed"}
+{"speaker": "Engineer", "text": "어제 오후 3시에 스테이징 환경 배포 및 통합 테스트를 완료했습니다.", "next_reaction": "네, 확인 감사합니다.", "label": "literal_declarative", "source": "seed"}
+{"speaker": "Analyst", "text": "이번 주 거래량은 전주 대비 12% 증가했습니다.", "next_reaction": "데이터 공유 고맙습니다.", "label": "literal_declarative", "source": "seed"}
+{"speaker": "Newbie", "text": "개발 환경 세팅 문서는 위키의 어느 폴더에 있나요?", "next_reaction": "온보딩 폴더 아래에 있습니다.", "label": "literal_interrogative", "source": "seed"}

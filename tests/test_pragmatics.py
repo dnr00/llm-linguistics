@@ -77,3 +77,52 @@ def test_empty_utterances_rejected() -> None:
 
     with pytest.raises(ValidationError):
         DialogueTurnInput(speaker="", text="안녕하세요.")
+
+
+def test_self_evolving_pragmatics_reaction_bootstrapping_and_ngram_inference(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    import shutil
+    from pathlib import Path
+
+    from llm_linguistics.pragmatics import reset_corpus_engine_for_testing
+    from llm_linguistics.pragmatics.corpus_learner import DEFAULT_CORPUS_PATH
+
+    temp_dir = Path(str(tmp_path))
+    temp_corpus = temp_dir / "pragmatics_corpus.jsonl"
+    temp_weights = temp_dir / "pragmatics_weights.json"
+    shutil.copyfile(DEFAULT_CORPUS_PATH, temp_corpus)
+
+    engine = reset_corpus_engine_for_testing(corpus_path=temp_corpus, weights_path=temp_weights)
+    engine.retrain_from_corpus()
+
+    # Novel expression not in static lexicon nor seed corpus yet
+    novel_probe = [
+        DialogueTurnInput(speaker="Lead", text="그 프로젝트는 동결 상태로 넘기겠습니다.")
+    ]
+    before_res = analyze_discourse(novel_probe)
+    assert before_res.utterances[0].illocutionary_force == "literal_declarative"
+
+    # Ingest unlabelled dialogue where reaction signals disappointment/deferral acceptance
+    unlabelled_dialogue = [
+        DialogueTurnInput(
+            speaker="Lead",
+            text="이번 분기에는 그 프로젝트를 동결 상태로 넘기겠습니다.",
+        ),
+        DialogueTurnInput(
+            speaker="Requester",
+            text="네, 아쉽네요. 보류하시는 걸로 알겠습니다.",
+        ),
+    ]
+    ingest_res = engine.ingest_dialogue_turns(unlabelled_dialogue)
+    assert ingest_res.bootstrapped_from_reactions == 1
+    assert ingest_res.appended_records == 1
+
+    # Morphological N-gram model now recognizes '동결/NNG + 상태/NNG + 넘기/VV' as refusal
+    after_res = analyze_discourse(novel_probe)
+    assert after_res.utterances[0].illocutionary_force == "indirect_refusal_or_deferral"
+    assert "corpus_ngram_match" in after_res.utterances[0].detected_markers
+
+    # Reset back to default repo paths after test
+    reset_corpus_engine_for_testing()
+

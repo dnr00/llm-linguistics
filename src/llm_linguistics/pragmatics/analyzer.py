@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from llm_linguistics.engine import get_kiwi, normalize_kiwi_jamo
 from llm_linguistics.learner import get_learner
+from llm_linguistics.pragmatics.corpus_learner import get_corpus_engine
 from llm_linguistics.pragmatics.schemas import (
     DialogueTurnInput,
     DiscourseAnalysisResult,
@@ -163,9 +164,10 @@ def _classify_sentence_type(
     return "declarative"
 
 
-def _detect_markers(text: str) -> tuple[dict[str, list[str]], float]:
+def _detect_markers(text: str) -> tuple[dict[str, list[str]], float, bool]:
     found: dict[str, list[str]] = {}
     weights: list[float] = []
+    has_suppressed_cue = False
     learned_cues = get_learner().state.pragmatic_cues
 
     for category, patterns in PRAGMATIC_MARKER_LEXICON.items():
@@ -174,6 +176,8 @@ def _detect_markers(text: str) -> tuple[dict[str, list[str]], float]:
             key = f"{category}:{pat}"
             learned = learned_cues.get(key)
             if learned is not None and learned.is_suppressed:
+                if pat in text:
+                    has_suppressed_cue = True
                 continue
             if pat in text:
                 matches.append(pat)
@@ -182,6 +186,9 @@ def _detect_markers(text: str) -> tuple[dict[str, list[str]], float]:
             found[category] = matches
 
     for cue in learned_cues.values():
+        if cue.is_suppressed and cue.phrase in text:
+            has_suppressed_cue = True
+            continue
         if not cue.is_active:
             continue
         if cue.phrase in text:
@@ -191,27 +198,33 @@ def _detect_markers(text: str) -> tuple[dict[str, list[str]], float]:
                 weights.append(cue.posterior_weight)
 
     confidence = round(sum(weights) / len(weights), 4) if weights else 1.0
-    return found, confidence
+    return found, confidence, has_suppressed_cue
 
 
 def _infer_illocutionary_force(
+    text: str,
     sentence_type: SentenceType,
     markers: dict[str, list[str]],
-) -> tuple[IllocutionaryForce, str]:
+    lexical_confidence: float,
+    has_suppressed_cue: bool,
+) -> tuple[IllocutionaryForce, float, str]:
     if "direct_pressure_or_blame" in markers:
         return (
             "direct_pressure_or_blame",
+            lexical_confidence,
             "Direct pressure or blame markers detected in utterance.",
         )
     if "indirect_refusal_cue" in markers:
         return (
             "indirect_refusal_or_deferral",
+            lexical_confidence,
             f"Surface form is {sentence_type}, but indirect refusal/deferral cues "
             f"({markers['indirect_refusal_cue']}) indicate polite rejection or postponement.",
         )
     if "soft_urge_cue" in markers:
         return (
             "indirect_request_or_urge",
+            lexical_confidence,
             f"Surface form is {sentence_type}, but soft urge cues "
             f"({markers['soft_urge_cue']}) indicate an indirect request for action/schedule.",
         )
@@ -220,17 +233,30 @@ def _infer_illocutionary_force(
     ):
         return (
             "hedged_dissent_or_reservation",
+            lexical_confidence,
             "Multiple hedging/cushion markers indicate reservation or softened disagreement.",
         )
+
+    if not has_suppressed_cue:
+        pred_cls, prob, matched_feats = get_corpus_engine().predict_from_ngram_weights(text)
+        if pred_cls is not None:
+            markers["corpus_ngram_match"] = matched_feats[:5]
+            return (
+                pred_cls,
+                prob,
+                f"Corpus-learned morphological N-gram model inferred {pred_cls} "
+                f"from features {matched_feats[:4]}.",
+            )
+
     if sentence_type == "imperative":
-        return ("direct_directive", "Direct command or instruction.")
+        return ("direct_directive", 1.0, "Direct command or instruction.")
     if sentence_type == "proposative":
-        return ("proposal", "Direct proposal for joint action.")
+        return ("proposal", 1.0, "Direct proposal for joint action.")
     if sentence_type == "interrogative":
-        return ("literal_interrogative", "Direct question.")
+        return ("literal_interrogative", 1.0, "Direct question.")
     if sentence_type == "fragment":
-        return ("literal_fragment", "Elliptical or nominal-ending statement.")
-    return ("literal_declarative", "Direct statement.")
+        return ("literal_fragment", 1.0, "Elliptical or nominal-ending statement.")
+    return ("literal_declarative", 1.0, "Direct statement.")
 
 
 def _compute_shift(prev_rank: int | None, curr_rank: int) -> PolitenessShift:
@@ -243,10 +269,16 @@ def _compute_shift(prev_rank: int | None, curr_rank: int) -> PolitenessShift:
     return "maintained"
 
 
-def analyze_discourse(utterances: list[DialogueTurnInput]) -> DiscourseAnalysisResult:
+def analyze_discourse(
+    utterances: list[DialogueTurnInput],
+    auto_harvest_reactions: bool = False,
+) -> DiscourseAnalysisResult:
     """Deterministically analyze speech levels, honorific shifts, and pragmatic markers."""
     if not utterances:
         raise ValueError("utterances list must not be empty.")
+
+    if auto_harvest_reactions and len(utterances) >= 2:
+        get_corpus_engine().ingest_dialogue_turns(utterances)
 
     kiwi = get_kiwi()
     results: list[UtterancePragmatics] = []
@@ -297,8 +329,14 @@ def analyze_discourse(utterances: list[DialogueTurnInput]) -> DiscourseAnalysisR
             politeness_drop_turns.append(idx)
 
         sentence_type = _classify_sentence_type(turn.text, ef_forms, speech_level)
-        markers, confidence = _detect_markers(turn.text)
-        illocutionary_force, note = _infer_illocutionary_force(sentence_type, markers)
+        markers, lex_conf, has_suppressed = _detect_markers(turn.text)
+        illocutionary_force, confidence, note = _infer_illocutionary_force(
+            turn.text,
+            sentence_type,
+            markers,
+            lex_conf,
+            has_suppressed,
+        )
 
         if illocutionary_force in (
             "indirect_refusal_or_deferral",
