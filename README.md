@@ -69,7 +69,7 @@ args = ["--directory", "/path/to/llm-linguistics", "run", "llm-linguistics-mcp"]
 
 ---
 
-## 제공 MCP 도구 (11종)
+## 제공 MCP 도구 (12종)
 
 ### 1. 형태론 (`morph_*`)
 * `morph_verify_constraints`: 한글 음절 수, 공백 제외 글자 수, 받침 제약(`none` | `all` | `only_sonorant`), 초성 시퀀스(`expected_choseong_sequence`), 어절별 모음조화 준수 여부를 검사하고 위반한 정확한 음절 인덱스를 반환합니다.
