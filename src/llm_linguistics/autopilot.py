@@ -335,6 +335,44 @@ PRAGMATIC_PRIORITY_MARKERS: tuple[str, ...] = (
 )
 
 
+CASUAL_COMMUNITY_DOMAINS: tuple[str, ...] = (
+    "arca.live",
+    "dcinside.com",
+    "ruliweb.com",
+    "dogdrip.net",
+    "pann.nate.com",
+    "fmkorea.com",
+)
+
+DEONTIC_CORE_SUFFIXES: tuple[str, ...] = (
+    "해야 합니다",
+    "해야 하네요",
+    "해야 한다",
+    "해야 함",
+    "해야함",
+    "해야 하",
+    "하면 안됩니다",
+    "하면 안된다",
+    "하면 안됨",
+    "하면 안되",
+    "해서는 안",
+    "해도 됩니다",
+    "해도 될까요",
+    "해도 된다",
+    "해도 됨",
+    "해도됨",
+)
+
+
+def _normalize_deontic_pattern(raw_pattern: str) -> str:
+    """Strip leading domain verb/noun stems from deontic patterns (e.g. '설치해야 하')."""
+    cleaned = raw_pattern.strip()
+    for core in DEONTIC_CORE_SUFFIXES:
+        if cleaned.endswith(core) and len(cleaned) > len(core):
+            return core
+    return cleaned
+
+
 def _pragmatic_candidate_priority(text: str) -> int:
     """Score candidate sentences so conversational/pragmatic turns precede flat headlines."""
     return sum(1 for marker in PRAGMATIC_PRIORITY_MARKERS if marker in text)
@@ -582,7 +620,12 @@ def run_autopilot_cycle(
 
             blocks = html_or_xml_to_blocks(raw_text, min_hangul_syllables=8)
             sentences = html_or_xml_to_sentences(raw_text, min_hangul_syllables=6)
-            if config.web_privacy_mode == "public_full" and sentences:
+            is_casual_community = any(dom in url.lower() for dom in CASUAL_COMMUNITY_DOMAINS)
+            if (
+                config.web_privacy_mode == "public_full"
+                and sentences
+                and not is_casual_community
+            ):
                 oov_res = learner.mine_corpus_oov_words(
                     texts=sentences, min_cnt=2, min_pos_score=0.2
                 )
@@ -753,6 +796,8 @@ def run_autopilot_cycle(
 
     added_cues = 0
     for cue in distilled.pragmatic_cues:
+        if len(cue.phrase.replace(" ", "")) < 3 and cue.phrase not in ("혹시", "과연", "글쎄"):
+            continue
         learner.record_pragmatic_feedback(
             phrase=cue.phrase,
             category=cue.category,
@@ -762,12 +807,16 @@ def run_autopilot_cycle(
 
     added_patterns = 0
     for pat in distilled.semantic_patterns:
+        norm_pat = _normalize_deontic_pattern(pat.pattern)
+        if len(norm_pat.replace(" ", "")) < 3:
+            continue
+        if norm_pat not in learner.state.semantic_patterns:
+            added_patterns += 1
         learner.register_semantic_pattern(
-            pattern=pat.pattern,
+            pattern=norm_pat,
             modality=pat.modality,
             is_exclusive=pat.is_exclusive,
         )
-        added_patterns += 1
 
     # 5. Checkpoint web hashes and reset circuit breaker after durable success
     for u, h in pending_web_hashes.items():
