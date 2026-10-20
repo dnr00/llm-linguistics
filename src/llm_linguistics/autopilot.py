@@ -55,7 +55,7 @@ LAUNCHD_LABEL = "com.uksang.llm-linguistics-autopilot"
 DEFAULT_LAUNCHD_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
 
 MAX_CONSECUTIVE_FAILURES = 3
-MAX_UTTERANCES_PER_LLM_CALL = 20
+MAX_UTTERANCES_PER_LLM_CALL = 8
 
 AutopilotStatus = Literal[
     "distilled",
@@ -67,9 +67,15 @@ AutopilotStatus = Literal[
 VALID_PRAGMATIC_CATEGORIES: frozenset[str] = frozenset({
     "indirect_refusal_cue",
     "soft_urge_cue",
-    "hedged_dissent_cue",
-    "pressure_blame_cue",
+    "hedging",
+    "apology_or_cushion",
+    "direct_pressure_or_blame",
 })
+
+PRAGMATIC_CATEGORY_ALIASES: dict[str, str] = {
+    "hedged_dissent_cue": "hedging",
+    "pressure_blame_cue": "direct_pressure_or_blame",
+}
 
 VALID_MODALITIES: frozenset[str] = frozenset({"MUST", "MUST_NOT", "MAY"})
 
@@ -349,7 +355,8 @@ def build_teacher_prompt(utterances: list[str]) -> str:
         "  ],\n"
         '  "pragmatic_cues": [\n'
         '    {"phrase": "<short Korean pragmatic marker substring>", "category": '
-        '"<indirect_refusal_cue | soft_urge_cue | hedged_dissent_cue | pressure_blame_cue>"}\n'
+        '"<indirect_refusal_cue | soft_urge_cue | hedging | apology_or_cushion | '
+        'direct_pressure_or_blame>"}\n'
         "  ],\n"
         '  "semantic_patterns": [\n'
         '    {"pattern": "<Korean deontic/policy phrase>", "modality": "<MUST | MUST_NOT | MAY>", '
@@ -387,6 +394,8 @@ def invoke_claude_teacher(
         "--safe-mode",
         "--strict-mcp-config",
         "--no-session-persistence",
+        "--system-prompt",
+        "You are a Korean linguistics JSON distiller. Output only a single raw JSON object.",
         "--model",
         "sonnet",
         "--effort",
@@ -396,11 +405,13 @@ def invoke_claude_teacher(
         "--max-turns",
         "1",
         "--tools=",
+        "--",
+        prompt,
     ]
 
     proc = subprocess.Popen(
         cmd,
-        stdin=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
@@ -408,7 +419,7 @@ def invoke_claude_teacher(
         start_new_session=True,
     )
     try:
-        stdout_str, stderr_str = proc.communicate(input=prompt, timeout=timeout_sec)
+        stdout_str, stderr_str = proc.communicate(timeout=timeout_sec)
     except subprocess.TimeoutExpired as exc:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -449,13 +460,11 @@ def invoke_claude_teacher(
 
     clean_cues: list[dict[str, Any]] = []
     for item in raw_cues:
-        if (
-            isinstance(item, dict)
-            and isinstance(item.get("phrase"), str)
-            and len(item["phrase"].strip()) >= 2
-            and item.get("category") in VALID_PRAGMATIC_CATEGORIES
-        ):
-            clean_cues.append({"phrase": item["phrase"].strip(), "category": item["category"]})
+        if isinstance(item, dict) and isinstance(item.get("phrase"), str):
+            raw_cat = str(item.get("category") or "")
+            norm_cat = PRAGMATIC_CATEGORY_ALIASES.get(raw_cat, raw_cat)
+            if len(item["phrase"].strip()) >= 2 and norm_cat in VALID_PRAGMATIC_CATEGORIES:
+                clean_cues.append({"phrase": item["phrase"].strip(), "category": norm_cat})
 
     clean_patterns: list[dict[str, Any]] = []
     for item in raw_patterns:
@@ -482,7 +491,7 @@ def run_autopilot_cycle(
     config: CollectSourcesConfig | None = None,
     max_utterances: int = MAX_UTTERANCES_PER_LLM_CALL,
     http_timeout_sec: float = 10.0,
-    llm_timeout_sec: float = 90.0,
+    llm_timeout_sec: float = 120.0,
 ) -> AutopilotRunReport:
     """Execute one bounded autonomous cycle: fetch -> LLM teacher -> local distillation."""
     logger = _configure_logger()
