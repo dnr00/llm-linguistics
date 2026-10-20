@@ -141,7 +141,13 @@ class OnlineLinguisticLearner:
             "VCP",
             "VCN",
             "Z_CODA",
+            "JKS",
+            "JKC",
             "JKG",
+            "JKO",
+            "JKB",
+            "JX",
+            "JC",
             "MM",
         }
 
@@ -181,7 +187,7 @@ class OnlineLinguisticLearner:
             if (
                 tags[-1] in trailing_forbidden_tags
                 or any(t in internal_forbidden_tags for t in tags)
-                or word_str.endswith("으")
+                or word_str.endswith(("으", "적", "만", "들"))
             ):
                 skipped += 1
                 continue
