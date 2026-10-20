@@ -16,3 +16,6 @@
 {"speaker": "Engineer", "text": "어제 오후 3시에 스테이징 환경 배포 및 통합 테스트를 완료했습니다.", "next_reaction": "네, 확인 감사합니다.", "label": "literal_declarative", "source": "seed"}
 {"speaker": "Analyst", "text": "이번 주 거래량은 전주 대비 12% 증가했습니다.", "next_reaction": "데이터 공유 고맙습니다.", "label": "literal_declarative", "source": "seed"}
 {"speaker": "Newbie", "text": "개발 환경 세팅 문서는 위키의 어느 폴더에 있나요?", "next_reaction": "온보딩 폴더 아래에 있습니다.", "label": "literal_interrogative", "source": "seed"}
+{"speaker": "llm_teacher", "text": "님 민주당 세번 밀어줬으면 성과를 내야지 서로 삽질 덜 하기로 표달라고 하나요", "label": "direct_pressure_or_blame", "source": "autopilot_claude_teacher", "utterance_hash": "53b27253f80d85708d6ddb28"}
+{"speaker": "llm_teacher", "text": "혹시 이런 증상이 왜 생기는지 아시는 분 계실까요?", "label": "indirect_request_or_urge", "source": "autopilot_claude_teacher", "utterance_hash": "1dc29e169e895ae21e9284e1"}
+{"speaker": "llm_teacher", "text": "그런데, 확실히 아직까진 시킨걸 잘하는거지 모든걸 다 챙기지는 못해서 제가 알고 있는 지식 기반으로 이거저거 더 할 수 있는지 검토해줘…이런 명령을 더 많이 해야 하네요.", "label": "hedged_dissent_or_reservation", "source": "autopilot_claude_teacher", "utterance_hash": "62c6ad093f68e1d4a481ed40"}
